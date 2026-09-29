@@ -89,6 +89,9 @@ let radioMeterValues:RadioMeterValues={rxDb:null,alc:null,powerWatts:null,powerP
 let audioInputDbfs=-120
 
 
+// Temporarily disabled while the Hamlib radio path is being redesigned. Keep the implementation for later re-enablement.
+const RADIO_SETTINGS_UI_ENABLED = false
+
 const LAYOUT_LIMITS = {
   waterfallMin: 150, waterfallMax: 340,
   operationHeight: 270,
@@ -601,7 +604,8 @@ function collectDraft(){
   settingsDraft=s;return s
 }
 
-function openSettings(tab='general'){settingsTab=tab;settingsDraft=cloneSettings(settingsState);renderSettingsModal(tab);document.querySelector('#settings-overlay')!.classList.add('open');if(tab==='audio')emitBackendEvent('audio:refresh','');if(tab==='radio'){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}
+function normalizeSettingsTab(tab:string){if(tab==='radio'&&!RADIO_SETTINGS_UI_ENABLED)return 'general';return ['general','radio','audio','frequency','macros'].includes(tab)?tab:'general'}
+function openSettings(tab='general'){const next=normalizeSettingsTab(tab);settingsTab=next;settingsDraft=cloneSettings(settingsState);renderSettingsModal(next);document.querySelector('#settings-overlay')!.classList.add('open');if(next==='audio')emitBackendEvent('audio:refresh','');if(next==='radio'&&RADIO_SETTINGS_UI_ENABLED){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}
 function closeSettings(){emitBackendEvent('hamlib:cancel','');emitBackendEvent('radio:test-end',{restore:true});document.querySelector('#settings-overlay')!.classList.remove('open')}
 function saveSettings(){collectDraft();settingsState=cloneSettings(settingsDraft);emitBackendEvent('settings:save',settingsState);setSettingsStatus('正在保存…')}
 function restoreDefaults(){if(confirm('恢复默认设置？')){settingsDraft=defaultSettings();renderSettingsModal(settingsTab);setSettingsStatus('已恢复默认值，请点击应用或确定')}}
@@ -757,12 +761,13 @@ function bindSettingsActions(overlay:HTMLElement,tab:string){
   if(tab==='radio'){populateSerialPorts();updateRadioPTTControls(overlay);updateRadioControlStates(overlay)}
 }
 function renderSettingsModal(tab=settingsTab){
+  tab=normalizeSettingsTab(tab);settingsTab=tab
   const overlay=document.querySelector('#settings-overlay')!;const s=settingsDraft
   overlay.innerHTML=`<div class="settings-window"><div class="settings-titlebar"><b>JTTY-Go — 设置</b><button id="settings-close" aria-label="关闭">×</button></div>
-    <div class="settings-tabs">${[['general','常规'],['radio','电台'],['audio','音频'],['frequency','频率'],['macros','快捷消息']].map(([id,label])=>`<button data-tab="${id}" class="${tab===id?'active':''}">${label}</button>`).join('')}</div>
+    <div class="settings-tabs">${[['general','常规'],['radio','电台'],['audio','音频'],['frequency','频率'],['macros','快捷消息']].map(([id,label])=>{const disabled=id==='radio'&&!RADIO_SETTINGS_UI_ENABLED;return `<button data-tab="${id}" class="${tab===id?'active':''}" ${disabled?'disabled aria-disabled="true" title="Hamlib 电台配置暂未启用"':''}>${label}</button>`}).join('')}</div>
     <div class="settings-body">${settingsPanel(tab)}</div>
     <div class="settings-footer"><span id="settings-status">就绪</span><div><button id="settings-defaults">默认</button><button id="settings-cancel">取消</button><button id="settings-apply">应用</button><button id="settings-ok" class="ok">确定</button></div></div></div>`
-  overlay.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{collectDraft();const nextTab=b.dataset.tab||'general';if(settingsTab==='radio'&&nextTab!=='radio')emitBackendEvent('hamlib:cancel','');settingsTab=nextTab;renderSettingsModal(settingsTab);if(settingsTab==='audio')emitBackendEvent('audio:refresh','');if(settingsTab==='radio'){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}))
+  overlay.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;collectDraft();const nextTab=normalizeSettingsTab(b.dataset.tab||'general');if(settingsTab==='radio'&&nextTab!=='radio')emitBackendEvent('hamlib:cancel','');settingsTab=nextTab;renderSettingsModal(settingsTab);if(settingsTab==='audio')emitBackendEvent('audio:refresh','');if(settingsTab==='radio'&&RADIO_SETTINGS_UI_ENABLED){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}))
   overlay.querySelector('#settings-close')!.addEventListener('click',closeSettings)
   overlay.querySelector('#settings-cancel')!.addEventListener('click',closeSettings)
   overlay.querySelector('#settings-defaults')!.addEventListener('click',restoreDefaults)
@@ -770,7 +775,7 @@ function renderSettingsModal(tab=settingsTab){
   overlay.querySelector('#settings-ok')!.addEventListener('click',()=>{saveSettings();setTimeout(closeSettings,120)})
   populateSettingsAudioDevices();populateHamlibModels();populateSerialPorts();bindSettingsActions(overlay as HTMLElement,tab)
   if(tab==='audio')emitBackendEvent('audio:refresh','')
-  if(tab==='radio'){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}
+  if(tab==='radio'&&RADIO_SETTINGS_UI_ENABLED){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}
 }
 function settingsPanel(tab:string){
   const s=settingsDraft

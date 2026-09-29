@@ -21,7 +21,7 @@ type wailsSink struct{ ctx context.Context }
 
 func (s wailsSink) Emit(event string, payload any) { wailsruntime.EventsEmit(s.ctx, event, payload) }
 
-const minMainWindowWidth = 1080
+const minMainWindowWidth = 1094
 
 func main() {
 	application := app.New()
