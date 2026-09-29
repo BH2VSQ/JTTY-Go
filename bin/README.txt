@@ -1,0 +1,1 @@
+Place all files from hamlib-w64-4.7.3~rc\bin here before building JTTY-Go. The files are embedded into the executable and released to <JTTY-Go install>\bin at first run. Existing runtime files are preserved so Hamlib updates are not overwritten.

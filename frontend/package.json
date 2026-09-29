@@ -1,0 +1,13 @@
+{
+  "name": "jtty-go-frontend",
+  "private": true,
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^7.1.7",
+    "typescript": "^5.9.2"
+  },
+  "type": "module"
+}
