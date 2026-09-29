@@ -3,7 +3,8 @@ param(
     [string]$Arch = 'amd64',
     [switch]$SkipTests,
     [switch]$SkipInstaller,
-    [switch]$Clean
+    [switch]$Clean,
+    [string]$InnoSetupPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,16 +108,92 @@ Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableZi
 
 if (-not $SkipInstaller) {
     if (-not (Test-Path $InstallerScript)) { throw "Installer script not found: $InstallerScript" }
-    $iscc = @(
-        (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source,
-        (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
-        (Join-Path ${env:ProgramFiles} 'Inno Setup 6\ISCC.exe')
-    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+
+    # Resolve ISCC.exe robustly. Inno Setup may be installed machine-wide,
+    # per-user, through PATH/package managers, or in a custom location.
+    $isccCandidates = New-Object System.Collections.Generic.List[string]
+
+    if ($InnoSetupPath) {
+        [void]$isccCandidates.Add((Resolve-Path -LiteralPath $InnoSetupPath -ErrorAction SilentlyContinue).Path)
+        if (-not $isccCandidates[$isccCandidates.Count - 1]) {
+            # Keep the raw path so the diagnostic list still shows what was supplied.
+            [void]$isccCandidates.Add($InnoSetupPath)
+        }
+    }
+
+    $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        foreach ($path in @($cmd.Source, $cmd.Path, $cmd.Definition)) {
+            if ($path -and -not $isccCandidates.Contains([string]$path)) {
+                [void]$isccCandidates.Add([string]$path)
+            }
+        }
+    }
+
+    # Common installation locations.
+    $filesystemCandidates = @(
+        @{ Root = ${env:ProgramFiles(x86)}; Relative = 'Inno Setup 6\ISCC.exe' },
+        @{ Root = ${env:ProgramFiles}; Relative = 'Inno Setup 6\ISCC.exe' },
+        @{ Root = $env:LOCALAPPDATA; Relative = 'Programs\Inno Setup 6\ISCC.exe' },
+        @{ Root = $env:LOCALAPPDATA; Relative = 'Inno Setup 6\ISCC.exe' },
+        @{ Root = $env:USERPROFILE; Relative = 'scoop\apps\innosetup\current\ISCC.exe' },
+        @{ Root = $env:ChocolateyInstall; Relative = 'bin\ISCC.exe' }
+    )
+    foreach ($pathSpec in $filesystemCandidates) {
+        if (-not $pathSpec.Root) { continue }
+        $candidate = Join-Path $pathSpec.Root $pathSpec.Relative
+        if (-not $isccCandidates.Contains($candidate)) {
+            [void]$isccCandidates.Add($candidate)
+        }
+    }
+
+    # Inno Setup records its installation directory in the uninstall registry
+    # entry. This also covers custom installation paths not in PATH.
+    $uninstallRoots = @(
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )
+    foreach ($root in $uninstallRoots) {
+        if (-not (Test-Path $root)) { continue }
+        try {
+            foreach ($key in Get-ChildItem $root -ErrorAction Stop) {
+                try {
+                    $item = Get-ItemProperty $key.PSPath -ErrorAction Stop
+                    if ($item.DisplayName -like 'Inno Setup*' -and $item.InstallLocation) {
+                        $candidate = Join-Path ([string]$item.InstallLocation) 'ISCC.exe'
+                        if (-not $isccCandidates.Contains($candidate)) {
+                            [void]$isccCandidates.Add($candidate)
+                        }
+                    }
+                } catch {
+                    # Ignore an unreadable uninstall entry and continue.
+                }
+            }
+        } catch {
+            # Ignore unavailable registry hives and continue.
+        }
+    }
+
+    $iscc = $isccCandidates |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+        Select-Object -First 1
 
     if (-not $iscc) {
         Write-Warning 'Inno Setup 6 was not found. Portable package was created, installer step skipped.'
+        Write-Host ''
+        Write-Host 'ISCC.exe was not found. Checked locations:' -ForegroundColor DarkYellow
+        foreach ($candidate in ($isccCandidates | Select-Object -Unique)) {
+            Write-Host "  - $candidate" -ForegroundColor DarkYellow
+        }
+        Write-Host ''
+        Write-Host 'Use one of the following:' -ForegroundColor DarkYellow
+        Write-Host '  1. Add the Inno Setup 6 directory containing ISCC.exe to PATH.' -ForegroundColor DarkYellow
+        Write-Host '  2. Run: .\scripts\package-windows.ps1 -InnoSetupPath "C:\Path\To\ISCC.exe"' -ForegroundColor DarkYellow
     }
     else {
+        $iscc = (Resolve-Path -LiteralPath $iscc).Path
+        Write-Host "Inno Setup compiler: $iscc" -ForegroundColor DarkGray
         Write-Host '[5/5] Building single-file Windows installer...' -ForegroundColor Yellow
         & $iscc "/DArch=$Arch" "/DSourceExe=$exe" $InstallerScript
         if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }

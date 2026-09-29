@@ -1012,8 +1012,7 @@ function app(){
         </section>
 
         <section class="op-right">
-          <div class="macro-grid" id="main-macros"></div>
-          <div class="tx-queue"><div class="queue-title">发送队列</div><div id="queue-list">—</div></div>
+          <div class="macro-grid" id="main-macros" aria-label="预置信息"></div>
         </section>
       </div>
     </section>
