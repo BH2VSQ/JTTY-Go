@@ -76,6 +76,7 @@ let audioDevices:{inputs:AudioDevice[];outputs:AudioDevice[]}={inputs:[],outputs
 let hamlibModels:HamlibModel[]=[]
 let hamlibCapabilities:HamlibCapabilities|null=null
 let hamlibCapabilitiesModelId=0
+let hamlibCapabilitiesPendingModelId=0
 let serialPorts:string[]=[]
 let dialFrequency=0
 let dialMode=''
@@ -492,9 +493,12 @@ function selectedHamlibCapabilities():HamlibCapabilities|null{
   return id>0 && hamlibCapabilitiesModelId===id ? hamlibCapabilities : null
 }
 function requestHamlibCapabilities(modelId:number){
-  if(modelId<=0){hamlibCapabilities=null;hamlibCapabilitiesModelId=0;const overlay=document.querySelector<HTMLElement>('#settings-overlay');if(overlay)updateRadioControlStates(overlay);return}
+  if(modelId<=0){hamlibCapabilities=null;hamlibCapabilitiesModelId=0;hamlibCapabilitiesPendingModelId=0;const overlay=document.querySelector<HTMLElement>('#settings-overlay');if(overlay)updateRadioControlStates(overlay);return}
+  if(hamlibCapabilitiesModelId===modelId && hamlibCapabilities){const overlay=document.querySelector<HTMLElement>('#settings-overlay');if(overlay)updateRadioControlStates(overlay);return}
+  if(hamlibCapabilitiesPendingModelId===modelId)return
   hamlibCapabilities=null
   hamlibCapabilitiesModelId=modelId
+  hamlibCapabilitiesPendingModelId=modelId
   const overlay=document.querySelector<HTMLElement>('#settings-overlay');if(overlay)updateRadioControlStates(overlay)
   emitBackendEvent('hamlib:capabilities',modelId)
 }
@@ -598,7 +602,7 @@ function collectDraft(){
 }
 
 function openSettings(tab='general'){settingsTab=tab;settingsDraft=cloneSettings(settingsState);renderSettingsModal(tab);document.querySelector('#settings-overlay')!.classList.add('open');if(tab==='audio')emitBackendEvent('audio:refresh','');if(tab==='radio'){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}
-function closeSettings(){emitBackendEvent('radio:test-end',{restore:true});document.querySelector('#settings-overlay')!.classList.remove('open')}
+function closeSettings(){emitBackendEvent('hamlib:cancel','');emitBackendEvent('radio:test-end',{restore:true});document.querySelector('#settings-overlay')!.classList.remove('open')}
 function saveSettings(){collectDraft();settingsState=cloneSettings(settingsDraft);emitBackendEvent('settings:save',settingsState);setSettingsStatus('正在保存…')}
 function restoreDefaults(){if(confirm('恢复默认设置？')){settingsDraft=defaultSettings();renderSettingsModal(settingsTab);setSettingsStatus('已恢复默认值，请点击应用或确定')}}
 
@@ -746,7 +750,6 @@ function bindSettingsActions(overlay:HTMLElement,tab:string){
     }
     requestHamlibCapabilities(id)
     updateRadioPTTControls(overlay);updateRadioControlStates(overlay)
-    emitBackendEvent('hamlib:status','64')
     emitBackendEvent('radio:serial-ports','')
   })
   overlay.querySelectorAll<HTMLInputElement>('input[name="txaudio-ui"]').forEach(e=>e.addEventListener('change',()=>{const sel=overlay.querySelector<HTMLSelectElement>('#set-txaudio');if(sel)sel.value=e.value}))
@@ -759,7 +762,7 @@ function renderSettingsModal(tab=settingsTab){
     <div class="settings-tabs">${[['general','常规'],['radio','电台'],['audio','音频'],['frequency','频率'],['macros','快捷消息']].map(([id,label])=>`<button data-tab="${id}" class="${tab===id?'active':''}">${label}</button>`).join('')}</div>
     <div class="settings-body">${settingsPanel(tab)}</div>
     <div class="settings-footer"><span id="settings-status">就绪</span><div><button id="settings-defaults">默认</button><button id="settings-cancel">取消</button><button id="settings-apply">应用</button><button id="settings-ok" class="ok">确定</button></div></div></div>`
-  overlay.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{collectDraft();settingsTab=b.dataset.tab||'general';renderSettingsModal(settingsTab);if(settingsTab==='audio')emitBackendEvent('audio:refresh','');if(settingsTab==='radio'){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}))
+  overlay.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{collectDraft();const nextTab=b.dataset.tab||'general';if(settingsTab==='radio'&&nextTab!=='radio')emitBackendEvent('hamlib:cancel','');settingsTab=nextTab;renderSettingsModal(settingsTab);if(settingsTab==='audio')emitBackendEvent('audio:refresh','');if(settingsTab==='radio'){emitBackendEvent('hamlib:status','64');emitBackendEvent('hamlib:models','');emitBackendEvent('radio:serial-ports','')}}))
   overlay.querySelector('#settings-close')!.addEventListener('click',closeSettings)
   overlay.querySelector('#settings-cancel')!.addEventListener('click',closeSettings)
   overlay.querySelector('#settings-defaults')!.addEventListener('click',restoreDefaults)
@@ -903,6 +906,7 @@ function installWailsEvents(root:Element){
     const id=Number(v?.modelId||v?.capabilities?.modelId||0);
     const current=Number(overlay?.querySelector<HTMLSelectElement>('#set-rig-model')?.value||settingsDraft.radio.rigModelId||0);
     if(!overlay || id!==current)return;
+    if(hamlibCapabilitiesPendingModelId===id)hamlibCapabilitiesPendingModelId=0
     if(v?.available && v?.capabilities){hamlibCapabilities=v.capabilities as HamlibCapabilities;hamlibCapabilitiesModelId=id}
     else {hamlibCapabilities=null;hamlibCapabilitiesModelId=id}
     updateRadioControlStates(overlay);

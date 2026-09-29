@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -372,7 +371,7 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		cmd := exec.CommandContext(ctx, candidate, "-m", strconv.Itoa(modelID), "-u")
+		cmd := newHamlibCommandContext(ctx, candidate, "-m", strconv.Itoa(modelID), "-u")
 		cmd.Dir = filepath.Dir(candidate)
 		cmd.Env = prependPath(cmd.Environ(), cmd.Dir)
 		out, err := cmd.CombinedOutput()
@@ -417,7 +416,7 @@ func ListHamlibModels(ctx context.Context, executable string) ([]HamlibModel, er
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		cmd := exec.CommandContext(ctx, candidate, "-l")
+		cmd := newHamlibCommandContext(ctx, candidate, "-l")
 		cmd.Dir = dir
 		cmd.Env = prependPath(cmd.Environ(), dir)
 		out, err := cmd.CombinedOutput()

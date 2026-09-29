@@ -71,6 +71,12 @@ func resolveHamlibExecutable(executable string) string {
 // own directory as both its working directory and the first PATH entry. This
 // makes the DLL selection deterministic on Windows.
 func ProbeHamlibVersion(executable, installDir string) (string, error) {
+	return ProbeHamlibVersionContext(context.Background(), executable, installDir)
+}
+
+// ProbeHamlibVersionContext is the cancellable variant used by the GUI. The
+// settings page must be able to cancel a pending probe when it is closed.
+func ProbeHamlibVersionContext(ctx context.Context, executable, installDir string) (string, error) {
 	if runtime.GOOS != "windows" {
 		return "", fmt.Errorf("Hamlib runtime probe is only available on Windows")
 	}
@@ -81,7 +87,7 @@ func ProbeHamlibVersion(executable, installDir string) (string, error) {
 	if installDir == "" {
 		installDir = filepath.Dir(exe)
 	}
-	cmd := exec.Command(exe, "-V")
+	cmd := newHamlibCommandContext(ctx, exe, "-V")
 	cmd.Dir = installDir
 	cmd.Env = prependPath(cmd.Environ(), installDir)
 	output, err := cmd.CombinedOutput()
@@ -158,6 +164,11 @@ func hamlibVersionNumber(value string) string {
 }
 
 func HamlibStatusWithExecutable(arch, installDir, executable string) (HamlibUpdateStatus, error) {
+	return HamlibStatusWithExecutableContext(context.Background(), arch, installDir, executable)
+}
+
+// HamlibStatusWithExecutableContext is the cancellable GUI-facing status probe.
+func HamlibStatusWithExecutableContext(ctx context.Context, arch, installDir, executable string) (HamlibUpdateStatus, error) {
 	if runtime.GOOS != "windows" {
 		return HamlibUpdateStatus{Architecture: arch, SourceURL: hamlibURL(arch), Note: "Hamlib DLL update is only available on Windows."}, nil
 	}
@@ -192,7 +203,7 @@ func HamlibStatusWithExecutable(arch, installDir, executable string) (HamlibUpda
 	if exe != "" {
 		status.ExecutablePath = exe
 		exeDir := filepath.Dir(exe)
-		if version, err := ProbeHamlibVersion(exe, exeDir); err == nil {
+		if version, err := ProbeHamlibVersionContext(ctx, exe, exeDir); err == nil {
 			status.RuntimeVersion = version
 			status.RuntimeVerified = true
 			if status.DLLVerified {
@@ -410,7 +421,7 @@ func stopHamlibClients(ctx context.Context) {
 		ctx = context.Background()
 	}
 	for _, image := range []string{"rigctld.exe", "rigctl.exe"} {
-		cmd := exec.CommandContext(ctx, "taskkill", "/F", "/T", "/IM", image)
+		cmd := newHamlibCommandContext(ctx, "taskkill", "/F", "/T", "/IM", image)
 		_ = cmd.Run()
 	}
 	time.Sleep(300 * time.Millisecond)
