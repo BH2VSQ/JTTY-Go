@@ -175,7 +175,7 @@ function mergeSettings(v:any):Settings{
     macros:Array.isArray(v.macros)?v.macros:d.macros,decodeLogMode:typeof v.decodeLogMode==='string'?v.decodeLogMode:d.decodeLogMode,decodeLogEnabled:typeof v.decodeLogEnabled==='boolean'?v.decodeLogEnabled:d.decodeLogEnabled,recordEnabled:typeof v.recordEnabled==='boolean'?v.recordEnabled:d.recordEnabled,exchangeSerialNumber:Number(v.exchangeSerialNumber)>0?Math.floor(Number(v.exchangeSerialNumber)):d.exchangeSerialNumber,rxFrequencyHz:Number(v.rxFrequencyHz)>=200&&Number(v.rxFrequencyHz)<=5000?Math.round(Number(v.rxFrequencyHz)):d.rxFrequencyHz,txFrequencyHz:Number(v.txFrequencyHz)>=200&&Number(v.txFrequencyHz)<=5000?Math.round(Number(v.txFrequencyHz)):d.txFrequencyHz} as Settings
 }
 
-function setDX(call:string,notifyBackend=true){const normalized=String(call||'').trim().toUpperCase();const dx=document.querySelector<HTMLInputElement>('#dx');if(dx)dx.value=normalized;if(notifyBackend)emitBackendEvent('qso:dxcall',normalized);return normalized}
+function setDX(call:string,notifyBackend=true){const normalized=String(call||'').trim().toUpperCase();const dx=document.querySelector<HTMLInputElement>('#dx');if(dx)dx.value=normalized;if(notifyBackend)emitBackendEvent('qso:set-dxcall',normalized);return normalized}
 function setTXAudioLevel(level:number, notifyBackend=true){
   let n=Math.round(level)
   if(!Number.isFinite(n)) n=65
@@ -271,7 +271,7 @@ function renderMessage(m:DecodeMessage,root:Element,targetId='decodes'){
   div.innerHTML='<span class="utc"></span><span class="snr-value"></span><span class="df"></span><span class="message"></span>'
   const dt=new Date(m.signalUtc||m.receivedUtc||Date.now());div.querySelector('.utc')!.textContent=dt.toISOString().slice(11,19);div.querySelector('.snr-value')!.textContent=Number.isFinite(m.snr)?`${m.snr} dB`:'—';div.querySelector('.df')!.textContent=String(m.frequencyHz)
   const message=div.querySelector('.message')!;const calls=m.callsigns||[];let cursor=0
-  for(const c of calls){if(c.start>cursor)message.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:dxgrid',g)}});message.append(b);cursor=c.end}
+  for(const c of calls){if(c.start>cursor)message.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:set-dxgrid',g)}});message.append(b);cursor=c.end}
   if(cursor<m.message.length)message.append(document.createTextNode(m.message.slice(cursor)))
   const states:Record<string,string>={growing:'接收中',complete:'完整',expired:'超时', 'reception-ended':'接收结束'}
   if(m.jttyTerminal&&states[m.jttyTerminal]){const status=document.createElement('small');status.className='jtty-reception-state';status.textContent=states[m.jttyTerminal];status.title=m.jttyTerminal==='expired'?'未收到消息结束标记，保留已接收内容':status.textContent;message.append(status)}
@@ -310,7 +310,7 @@ function addQSOTx(message:string,utc:string,frequencyHz:number){
   while(qsoRows.length>64)qsoRows.shift()
   renderQSOList()
 }
-function renderQSOMessage(m:QSOListItem,msg:HTMLElement){const calls=m.callsigns||[];let cursor=0;for(const c of calls){if(c.start>cursor)msg.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:dxgrid',g)}});msg.append(b);cursor=c.end}if(cursor<m.message.length)msg.append(document.createTextNode(m.message.slice(cursor)))}
+function renderQSOMessage(m:QSOListItem,msg:HTMLElement){const calls=m.callsigns||[];let cursor=0;for(const c of calls){if(c.start>cursor)msg.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:set-dxgrid',g)}});msg.append(b);cursor=c.end}if(cursor<m.message.length)msg.append(document.createTextNode(m.message.slice(cursor)))}
 function renderQSOList(){const list=document.querySelector<HTMLDivElement>('#qso-decodes');if(!list)return;list.innerHTML='';const source=qsoRows.filter(r=>r.tx).sort((a,b)=>{const ta=Date.parse(a.utc),tb=Date.parse(b.utc);const va=Number.isFinite(ta)?ta:Number.POSITIVE_INFINITY;const vb=Number.isFinite(tb)?tb:Number.POSITIVE_INFINITY;if(va!==vb)return va-vb;return a.sequence-b.sequence}).slice(-24);for(const m of source){const div=document.createElement('div');div.className=`qso-decode-row${m.tx?' qso-tx-row':''}`;div.dataset.key=m.key;div.innerHTML='<span class="qso-utc"></span><span class="qso-df"></span><span class="qso-msg"></span>';const utc=div.querySelector('.qso-utc')!;const d=new Date(m.utc);utc.textContent=Number.isNaN(d.getTime())?'--:--:--':d.toISOString().slice(11,19);div.querySelector('.qso-df')!.textContent=String(m.frequencyHz);renderQSOMessage(m,div.querySelector('.qso-msg')!);div.addEventListener('click',()=>setTXFrequency(m.frequencyHz));list.append(div)}if(!source.length){const e=document.createElement('div');e.className='qso-empty';e.textContent='—';list.append(e)}}
 
 function updateWaterfallMarkers(){
@@ -514,7 +514,7 @@ function requestHamlibCapabilities(modelId:number){
   hamlibCapabilitiesModelId=modelId
   hamlibCapabilitiesPendingModelId=modelId
   const overlay=document.querySelector<HTMLElement>('#settings-overlay');if(overlay)updateRadioControlStates(overlay)
-  emitBackendEvent('hamlib:capabilities',modelId)
+  emitBackendEvent('hamlib:capabilities:request',modelId)
 }
 function populateHamlibModels(loadCapabilities=false){
   const sel=document.querySelector<HTMLSelectElement>('#set-rig-model');if(!sel)return
@@ -771,7 +771,7 @@ function updateRadioPTTControls(root:Element){updateRadioControlStates(root)}
 function bindSettingsActions(overlay:HTMLElement,tab:string){
   overlay.querySelector('#radio-refresh-serial')?.addEventListener('click',()=>{
     setSettingsStatus('正在刷新本机串口列表…')
-    emitBackendEvent('radio:serial-ports','')
+    emitBackendEvent('radio:serial-ports:request','')
   })
   overlay.querySelector('#audio-refresh')?.addEventListener('click',()=>emitBackendEvent('audio:refresh',''))
   overlay.querySelector('#radio-test-cat')?.addEventListener('click',()=>{
@@ -863,8 +863,8 @@ function renderSettingsModal(tab=settingsTab){
   overlay.querySelector('#settings-ok')!.addEventListener('click',()=>saveSettings(true))
   populateSettingsAudioDevices();populateHamlibModels(false);populateSerialPorts();bindSettingsActions(overlay as HTMLElement,tab)
   if(tab==='audio')emitBackendEvent('audio:refresh','')
-  if(tab==='radio'&&settingsDraft.radio.backend==='hamlib-local'){emitBackendEvent('hamlib:models',false);requestHamlibCapabilities(settingsDraft.radio.rigModelId)}
-  if(tab==='radio')emitBackendEvent('radio:serial-ports','')
+  if(tab==='radio'&&settingsDraft.radio.backend==='hamlib-local'){emitBackendEvent('hamlib:models:request',false);requestHamlibCapabilities(settingsDraft.radio.rigModelId)}
+  if(tab==='radio')emitBackendEvent('radio:serial-ports:request','')
 }
 function settingsPanel(tab:string){
   const s=settingsDraft
@@ -1276,7 +1276,7 @@ function handleRadioTestResult(v:any){
 
   root.querySelector<HTMLInputElement>('#tx-level')!.addEventListener('input',e=>setTXAudioLevel(Number((e.target as HTMLInputElement).value),true))
   root.querySelector('#clear')!.addEventListener('click',()=>root.querySelector<HTMLInputElement>('#tx')!.value='')
-  root.querySelector<HTMLInputElement>('#dx')!.addEventListener('change',e=>setDX((e.target as HTMLInputElement).value));root.querySelector<HTMLInputElement>('#dx-grid')!.addEventListener('change',e=>{const g=(e.target as HTMLInputElement).value.trim().toUpperCase();dxGrid=g;(e.target as HTMLInputElement).value=g;emitBackendEvent('qso:dxgrid',g)});root.querySelector<HTMLInputElement>('#serial-number')!.addEventListener('change',e=>{const n=Math.max(1,Math.floor(num((e.target as HTMLInputElement).value,settingsState.exchangeSerialNumber)));(e.target as HTMLInputElement).value=String(n);settingsState.exchangeSerialNumber=n;emitBackendEvent('qso:serial-set',n)})
+  root.querySelector<HTMLInputElement>('#dx')!.addEventListener('change',e=>setDX((e.target as HTMLInputElement).value));root.querySelector<HTMLInputElement>('#dx-grid')!.addEventListener('change',e=>{const g=(e.target as HTMLInputElement).value.trim().toUpperCase();dxGrid=g;(e.target as HTMLInputElement).value=g;emitBackendEvent('qso:set-dxgrid',g)});root.querySelector<HTMLInputElement>('#serial-number')!.addEventListener('change',e=>{const n=Math.max(1,Math.floor(num((e.target as HTMLInputElement).value,settingsState.exchangeSerialNumber)));(e.target as HTMLInputElement).value=String(n);settingsState.exchangeSerialNumber=n;emitBackendEvent('qso:serial-set',n)})
   root.querySelector('#save-apply')!.addEventListener('click',()=>{emitSaveOptions();root.querySelector('#save-popup')!.classList.remove('open')})
   updateSavePopup()
   root.querySelector('#send')!.addEventListener('click',()=>{const call=setDX(root.querySelector<HTMLInputElement>('#dx')?.value||'');const message=root.querySelector<HTMLInputElement>('#tx')!.value;emitBackendEvent('tx:send',{call,message})})

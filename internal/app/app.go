@@ -446,7 +446,7 @@ func (a *App) Startup(ctx context.Context) {
 		}
 	}
 	// NET rigctl speaks TCP directly; no local Hamlib DLL or rigctld process is required.
-	wailsruntime.EventsOn(ctx, "qso:dxcall", func(data ...interface{}) {
+	wailsruntime.EventsOn(ctx, "qso:set-dxcall", func(data ...interface{}) {
 		if len(data) == 0 {
 			return
 		}
@@ -475,7 +475,7 @@ func (a *App) Startup(ctx context.Context) {
 			return
 		}
 	})
-	wailsruntime.EventsOn(ctx, "qso:dxgrid", func(data ...interface{}) {
+	wailsruntime.EventsOn(ctx, "qso:set-dxgrid", func(data ...interface{}) {
 		if len(data) == 0 {
 			return
 		}
@@ -667,234 +667,9 @@ func (a *App) Startup(ctx context.Context) {
 		}
 		a.closeTestRadio(restore)
 	})
-	wailsruntime.EventsOn(ctx, "hamlib:cancel", func(data ...interface{}) {
-		_ = data
-		a.cancelHamlibOperations()
+	a.registerHamlibEvents(func(name string, callback func(...interface{})) {
+		wailsruntime.EventsOn(ctx, name, callback)
 	})
-	wailsruntime.EventsOn(ctx, "hamlib:models", func(data ...interface{}) {
-		force := false
-		if len(data) > 0 {
-			switch v := data[0].(type) {
-			case string:
-				force = strings.EqualFold(strings.TrimSpace(v), "force")
-			case map[string]interface{}:
-				if raw, ok := v["force"].(bool); ok {
-					force = raw
-				}
-			}
-		}
-
-		a.hamlibCacheMu.RLock()
-		cached := a.hamlibModelsCached && !force
-		models := cloneHamlibModels(a.hamlibModelsCache)
-		a.hamlibCacheMu.RUnlock()
-		if cached {
-			a.emit(model.EventHamlibModels, models)
-			return
-		}
-
-		a.hamlibInflightMu.Lock()
-		if a.hamlibModelsInflight {
-			a.hamlibInflightMu.Unlock()
-			return
-		}
-		a.hamlibModelsInflight = true
-		generation := a.hamlibProbeGeneration()
-		a.hamlibInflightMu.Unlock()
-
-		go func() {
-			defer func() {
-				a.hamlibInflightMu.Lock()
-				a.hamlibModelsInflight = false
-				a.hamlibInflightMu.Unlock()
-			}()
-
-			ctxProbe, done := a.beginHamlibOperation(3 * time.Second)
-			defer done()
-			if err := a.acquireHamlibExec(ctxProbe); err != nil {
-				return
-			}
-			defer a.releaseHamlibExec()
-			if !a.hamlibProbeCurrent(generation) {
-				return
-			}
-
-			models, err := radio.ListHamlibModels(ctxProbe, a.hamlibExecutable())
-			if err != nil {
-				if ctxProbe.Err() != nil || !a.hamlibProbeCurrent(generation) {
-					return
-				}
-				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
-				return
-			}
-			if !a.hamlibProbeCurrent(generation) {
-				return
-			}
-			a.hamlibCacheMu.Lock()
-			a.hamlibModelsCache = cloneHamlibModels(models)
-			a.hamlibModelsCached = true
-			a.hamlibCacheMu.Unlock()
-			a.emit(model.EventHamlibModels, models)
-		}()
-	})
-	wailsruntime.EventsOn(ctx, "hamlib:capabilities", func(data ...interface{}) {
-		modelID := 0
-		if len(data) > 0 {
-			switch v := data[0].(type) {
-			case int:
-				modelID = v
-			case float64:
-				modelID = int(v)
-			case string:
-				modelID, _ = strconv.Atoi(strings.TrimSpace(v))
-			case map[string]interface{}:
-				if raw, ok := v["modelId"]; ok {
-					switch n := raw.(type) {
-					case float64:
-						modelID = int(n)
-					case int:
-						modelID = n
-					}
-				}
-			}
-		}
-		if modelID <= 0 {
-			return
-		}
-
-		a.hamlibCacheMu.RLock()
-		cachedCaps, cachedOK := a.hamlibCapsCache[modelID]
-		a.hamlibCacheMu.RUnlock()
-		if cachedOK {
-			a.emit(model.EventHamlibCapabilities, map[string]any{"modelId": modelID, "available": true, "capabilities": cachedCaps})
-			return
-		}
-
-		a.hamlibInflightMu.Lock()
-		if a.hamlibCapsInflight == nil {
-			a.hamlibCapsInflight = make(map[int]bool)
-		}
-		if a.hamlibCapsInflight[modelID] {
-			a.hamlibInflightMu.Unlock()
-			return
-		}
-		a.hamlibCapsInflight[modelID] = true
-		generation := a.hamlibProbeGeneration()
-		a.hamlibInflightMu.Unlock()
-
-		go func() {
-			defer func() {
-				a.hamlibInflightMu.Lock()
-				delete(a.hamlibCapsInflight, modelID)
-				a.hamlibInflightMu.Unlock()
-			}()
-
-			ctxProbe, done := a.beginHamlibOperation(3 * time.Second)
-			defer done()
-			if err := a.acquireHamlibExec(ctxProbe); err != nil {
-				return
-			}
-			defer a.releaseHamlibExec()
-			if !a.hamlibProbeCurrent(generation) {
-				return
-			}
-
-			caps, err := radio.HamlibModelCapabilities(ctxProbe, a.hamlibExecutable(), modelID)
-			if err != nil {
-				if ctxProbe.Err() != nil || !a.hamlibProbeCurrent(generation) {
-					return
-				}
-				a.emit(model.EventHamlibCapabilities, map[string]any{"modelId": modelID, "error": err.Error(), "available": false})
-				return
-			}
-			if !a.hamlibProbeCurrent(generation) {
-				return
-			}
-			a.hamlibCacheMu.Lock()
-			if a.hamlibCapsCache == nil {
-				a.hamlibCapsCache = make(map[int]radio.HamlibCapabilities)
-			}
-			a.hamlibCapsCache[modelID] = caps
-			a.hamlibCacheMu.Unlock()
-			a.emit(model.EventHamlibCapabilities, map[string]any{"modelId": modelID, "available": true, "capabilities": caps})
-		}()
-	})
-	wailsruntime.EventsOn(ctx, "radio:serial-ports", func(data ...interface{}) {
-		_ = data
-		a.emit(model.EventRadioSerialPorts, radio.AvailableSerialPorts())
-	})
-	wailsruntime.EventsOn(ctx, "hamlib:status", func(data ...interface{}) {
-		arch := "64"
-		if len(data) > 0 {
-			if v, ok := data[0].(string); ok && v != "" {
-				arch = v
-			}
-		}
-
-		a.hamlibCacheMu.RLock()
-		statusCached := a.hamlibStatusCache != nil && a.hamlibStatusCache.Architecture == arch
-		var cachedStatus radio.HamlibUpdateStatus
-		if statusCached {
-			cachedStatus = *a.hamlibStatusCache
-		}
-		a.hamlibCacheMu.RUnlock()
-		if statusCached {
-			a.emit(model.EventHamlibStatus, cachedStatus)
-			return
-		}
-
-		a.hamlibInflightMu.Lock()
-		if a.hamlibStatusInflight == nil {
-			a.hamlibStatusInflight = make(map[string]bool)
-		}
-		if a.hamlibStatusInflight[arch] {
-			a.hamlibInflightMu.Unlock()
-			return
-		}
-		a.hamlibStatusInflight[arch] = true
-		generation := a.hamlibProbeGeneration()
-		a.hamlibInflightMu.Unlock()
-
-		go func() {
-			defer func() {
-				a.hamlibInflightMu.Lock()
-				delete(a.hamlibStatusInflight, arch)
-				a.hamlibInflightMu.Unlock()
-			}()
-
-			ctxProbe, done := a.beginHamlibOperation(3 * time.Second)
-			defer done()
-			if err := a.acquireHamlibExec(ctxProbe); err != nil {
-				return
-			}
-			defer a.releaseHamlibExec()
-			if !a.hamlibProbeCurrent(generation) {
-				return
-			}
-
-			status, err := radio.HamlibStatusWithExecutableContext(ctxProbe, arch, a.hamlibInstallDir(), a.hamlibExecutable())
-			if err != nil {
-				if ctxProbe.Err() != nil || !a.hamlibProbeCurrent(generation) {
-					return
-				}
-				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
-				return
-			}
-			if !a.hamlibProbeCurrent(generation) {
-				return
-			}
-			a.hamlibCacheMu.Lock()
-			statusCopy := status
-			a.hamlibStatusCache = &statusCopy
-			a.hamlibCacheMu.Unlock()
-			a.emit(model.EventHamlibStatus, status)
-		}()
-	})
-	for _, event := range []string{"hamlib:update", "hamlib:revert"} {
-		wailsruntime.EventsOn(ctx, event, func(data ...interface{}) {
-			a.emit(model.EventSettingsError, map[string]any{"error": "Hamlib 随完整应用包升级，已禁用单 DLL 替换"})
-		})
-	}
 	wailsruntime.EventsOn(ctx, "file:open-adi", func(data ...interface{}) {
 		_ = data
 		err := a.OpenADIFLog()
@@ -3419,4 +3194,237 @@ func numericFrequency(v interface{}) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// Wails emits to Go listeners as well as JavaScript. Request names must never
+// match their response names, or even a cached reply schedules another request.
+func (a *App) registerHamlibEvents(on func(string, func(...interface{}))) {
+	on("hamlib:cancel", func(data ...interface{}) {
+		_ = data
+		a.cancelHamlibOperations()
+	})
+	on("hamlib:models:request", func(data ...interface{}) {
+		force := false
+		if len(data) > 0 {
+			switch v := data[0].(type) {
+			case string:
+				force = strings.EqualFold(strings.TrimSpace(v), "force")
+			case map[string]interface{}:
+				if raw, ok := v["force"].(bool); ok {
+					force = raw
+				}
+			}
+		}
+
+		a.hamlibCacheMu.RLock()
+		cached := a.hamlibModelsCached && !force
+		models := cloneHamlibModels(a.hamlibModelsCache)
+		a.hamlibCacheMu.RUnlock()
+		if cached {
+			a.emit(model.EventHamlibModels, models)
+			return
+		}
+
+		a.hamlibInflightMu.Lock()
+		if a.hamlibModelsInflight {
+			a.hamlibInflightMu.Unlock()
+			return
+		}
+		a.hamlibModelsInflight = true
+		generation := a.hamlibProbeGeneration()
+		a.hamlibInflightMu.Unlock()
+
+		go func() {
+			defer func() {
+				a.hamlibInflightMu.Lock()
+				a.hamlibModelsInflight = false
+				a.hamlibInflightMu.Unlock()
+			}()
+
+			ctxProbe, done := a.beginHamlibOperation(3 * time.Second)
+			defer done()
+			if err := a.acquireHamlibExec(ctxProbe); err != nil {
+				return
+			}
+			defer a.releaseHamlibExec()
+			if !a.hamlibProbeCurrent(generation) {
+				return
+			}
+
+			models, err := radio.ListHamlibModels(ctxProbe, a.hamlibExecutable())
+			if err != nil {
+				if ctxProbe.Err() != nil || !a.hamlibProbeCurrent(generation) {
+					return
+				}
+				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
+				return
+			}
+			if !a.hamlibProbeCurrent(generation) {
+				return
+			}
+			a.hamlibCacheMu.Lock()
+			a.hamlibModelsCache = cloneHamlibModels(models)
+			a.hamlibModelsCached = true
+			a.hamlibCacheMu.Unlock()
+			a.emit(model.EventHamlibModels, models)
+		}()
+	})
+	on("hamlib:capabilities:request", func(data ...interface{}) {
+		modelID := 0
+		if len(data) > 0 {
+			switch v := data[0].(type) {
+			case int:
+				modelID = v
+			case float64:
+				modelID = int(v)
+			case string:
+				modelID, _ = strconv.Atoi(strings.TrimSpace(v))
+			case map[string]interface{}:
+				if raw, ok := v["modelId"]; ok {
+					switch n := raw.(type) {
+					case float64:
+						modelID = int(n)
+					case int:
+						modelID = n
+					}
+				}
+			}
+		}
+		if modelID <= 0 {
+			return
+		}
+
+		a.hamlibCacheMu.RLock()
+		cachedCaps, cachedOK := a.hamlibCapsCache[modelID]
+		a.hamlibCacheMu.RUnlock()
+		if cachedOK {
+			a.emit(model.EventHamlibCapabilities, map[string]any{"modelId": modelID, "available": true, "capabilities": cachedCaps})
+			return
+		}
+
+		a.hamlibInflightMu.Lock()
+		if a.hamlibCapsInflight == nil {
+			a.hamlibCapsInflight = make(map[int]bool)
+		}
+		if a.hamlibCapsInflight[modelID] {
+			a.hamlibInflightMu.Unlock()
+			return
+		}
+		a.hamlibCapsInflight[modelID] = true
+		generation := a.hamlibProbeGeneration()
+		a.hamlibInflightMu.Unlock()
+
+		go func() {
+			defer func() {
+				a.hamlibInflightMu.Lock()
+				delete(a.hamlibCapsInflight, modelID)
+				a.hamlibInflightMu.Unlock()
+			}()
+
+			ctxProbe, done := a.beginHamlibOperation(3 * time.Second)
+			defer done()
+			if err := a.acquireHamlibExec(ctxProbe); err != nil {
+				return
+			}
+			defer a.releaseHamlibExec()
+			if !a.hamlibProbeCurrent(generation) {
+				return
+			}
+
+			caps, err := radio.HamlibModelCapabilities(ctxProbe, a.hamlibExecutable(), modelID)
+			if err != nil {
+				if ctxProbe.Err() != nil || !a.hamlibProbeCurrent(generation) {
+					return
+				}
+				a.emit(model.EventHamlibCapabilities, map[string]any{"modelId": modelID, "error": err.Error(), "available": false})
+				return
+			}
+			if !a.hamlibProbeCurrent(generation) {
+				return
+			}
+			a.hamlibCacheMu.Lock()
+			if a.hamlibCapsCache == nil {
+				a.hamlibCapsCache = make(map[int]radio.HamlibCapabilities)
+			}
+			a.hamlibCapsCache[modelID] = caps
+			a.hamlibCacheMu.Unlock()
+			a.emit(model.EventHamlibCapabilities, map[string]any{"modelId": modelID, "available": true, "capabilities": caps})
+		}()
+	})
+	on("radio:serial-ports:request", func(data ...interface{}) {
+		_ = data
+		a.emit(model.EventRadioSerialPorts, radio.AvailableSerialPorts())
+	})
+	on("hamlib:status:request", func(data ...interface{}) {
+		arch := "64"
+		if len(data) > 0 {
+			if v, ok := data[0].(string); ok && v != "" {
+				arch = v
+			}
+		}
+
+		a.hamlibCacheMu.RLock()
+		statusCached := a.hamlibStatusCache != nil && a.hamlibStatusCache.Architecture == arch
+		var cachedStatus radio.HamlibUpdateStatus
+		if statusCached {
+			cachedStatus = *a.hamlibStatusCache
+		}
+		a.hamlibCacheMu.RUnlock()
+		if statusCached {
+			a.emit(model.EventHamlibStatus, cachedStatus)
+			return
+		}
+
+		a.hamlibInflightMu.Lock()
+		if a.hamlibStatusInflight == nil {
+			a.hamlibStatusInflight = make(map[string]bool)
+		}
+		if a.hamlibStatusInflight[arch] {
+			a.hamlibInflightMu.Unlock()
+			return
+		}
+		a.hamlibStatusInflight[arch] = true
+		generation := a.hamlibProbeGeneration()
+		a.hamlibInflightMu.Unlock()
+
+		go func() {
+			defer func() {
+				a.hamlibInflightMu.Lock()
+				delete(a.hamlibStatusInflight, arch)
+				a.hamlibInflightMu.Unlock()
+			}()
+
+			ctxProbe, done := a.beginHamlibOperation(3 * time.Second)
+			defer done()
+			if err := a.acquireHamlibExec(ctxProbe); err != nil {
+				return
+			}
+			defer a.releaseHamlibExec()
+			if !a.hamlibProbeCurrent(generation) {
+				return
+			}
+
+			status, err := radio.HamlibStatusWithExecutableContext(ctxProbe, arch, a.hamlibInstallDir(), a.hamlibExecutable())
+			if err != nil {
+				if ctxProbe.Err() != nil || !a.hamlibProbeCurrent(generation) {
+					return
+				}
+				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
+				return
+			}
+			if !a.hamlibProbeCurrent(generation) {
+				return
+			}
+			a.hamlibCacheMu.Lock()
+			statusCopy := status
+			a.hamlibStatusCache = &statusCopy
+			a.hamlibCacheMu.Unlock()
+			a.emit(model.EventHamlibStatus, status)
+		}()
+	})
+	for _, event := range []string{"hamlib:update", "hamlib:revert"} {
+		on(event, func(data ...interface{}) {
+			a.emit(model.EventSettingsError, map[string]any{"error": "Hamlib 随完整应用包升级，已禁用单 DLL 替换"})
+		})
+	}
 }
