@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,4 +77,25 @@ func TestLocalHamlibAppLifecycle(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("cancel did not restore the live connection")
+}
+
+func TestFT817RequiresExplicitCATDevice(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("bundled Windows runtime")
+	}
+	executable, _ := filepath.Abs(filepath.Join("..", "..", "bin", "rigctld.exe"))
+	a := New()
+	cfg := a.settings.Radio
+	cfg.Backend = "hamlib-local"
+	cfg.RigModelID = 1020
+	cfg.RigctldPath = executable
+	cfg.SerialPort = ""
+	r, _, err := a.openConfiguredRadio(cfg)
+	if r != nil {
+		defer r.Close()
+		t.Fatal("missing CAT device unexpectedly opened a radio")
+	}
+	if err == nil || !strings.Contains(err.Error(), "请填写电台设备路径") {
+		t.Fatalf("missing port validation: %v", err)
+	}
 }

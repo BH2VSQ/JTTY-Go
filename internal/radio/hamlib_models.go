@@ -183,7 +183,6 @@ func ParseHamlibCapabilities(output string, modelID int) HamlibCapabilities {
 		}
 		lower := strings.ToLower(line)
 		value := valueAfterLabel(line)
-		vlower := strings.ToLower(value)
 
 		switch {
 		case strings.HasPrefix(lower, "port type"):
@@ -253,10 +252,11 @@ func ParseHamlibCapabilities(output string, modelID int) HamlibCapabilities {
 		case modeSeen && strings.HasPrefix(lower, "\t"):
 			modeBuf = append(modeBuf, strings.Fields(value)...)
 		}
-		_ = vlower
 	}
 
-	c.HasCATPTT = (strings.Contains(c.PTTType, "RIG_PTT_RIG") || strings.HasPrefix(c.PTTType, "RIG CAPABLE")) && c.HasSetPTT
+	// rigctl/rigctld overwrite caps->ptt_type with their command-line default
+	// (NONE when -P is absent). The backend setter reports actual CAT support.
+	c.HasCATPTT = c.HasSetPTT
 	c.HasCATPTTMicData = c.HasSetPTT && (c.HasCATPTTMicData || strings.Contains(c.PTTType, "MIC/DATA") || strings.Contains(c.PTTType, "MICDATA"))
 
 	for _, token := range modeBuf {
@@ -293,7 +293,7 @@ func valueAfterLabel(line string) string {
 func normalizeHamlibPortType(value string) string {
 	v := strings.ToUpper(strings.TrimSpace(value))
 	switch {
-	case strings.Contains(v, "RIG_PORT_SERIAL") || v == "SERIAL":
+	case strings.Contains(v, "RIG_PORT_SERIAL") || v == "SERIAL" || v == "RS-232" || v == "RS232":
 		return "serial"
 	case strings.Contains(v, "RIG_PORT_NETWORK") || strings.Contains(v, "NETWORK"):
 		return "network"
@@ -308,13 +308,16 @@ func normalizeHamlibPortType(value string) string {
 
 func containsCapabilityName(line, name string) bool {
 	human := strings.ReplaceAll(name, "_", " ")
-	human = strings.ReplaceAll(human, "freq", "frequency")
-	return strings.Contains(line, "can "+human) || strings.Contains(line, "can "+name) || strings.Contains(line, "can"+name) || strings.Contains(line, name+":")
+	longHuman := strings.ReplaceAll(human, "freq", "frequency")
+	return strings.Contains(line, "can "+human+":") || strings.Contains(line, "can "+longHuman+":") || strings.Contains(line, "can "+name) || strings.Contains(line, "can"+name) || strings.Contains(line, name+":")
 }
 
 func parseYesNo(value string) (bool, bool) {
 	v := strings.ToLower(strings.TrimSpace(value))
 	v = strings.TrimSpace(strings.Trim(v, "[]()"))
+	if v == "e" {
+		return true, true
+	} // Supported through Hamlib emulation.
 	if strings.HasPrefix(v, "y") || strings.HasPrefix(v, "yes") || strings.HasPrefix(v, "true") || strings.HasPrefix(v, "1 ") || v == "1" {
 		return true, true
 	}
@@ -363,7 +366,9 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		cmd := newHamlibCommandContext(ctx, candidate, "-m", strconv.Itoa(modelID), "-u")
+		// -L reports the native PTT Value before the CLI overwrites it; -u
+		// prints capabilities and exits before rig_open, without touching CAT.
+		cmd := newHamlibCommandContext(ctx, candidate, "-m", strconv.Itoa(modelID), "-L", "-u")
 		cmd.Dir = filepath.Dir(candidate)
 		cmd.Env = prependPath(cmd.Environ(), cmd.Dir)
 		out, err := cmd.CombinedOutput()
@@ -372,6 +377,7 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 			continue
 		}
 		caps := ParseHamlibCapabilities(string(out), modelID)
+		caps.HasCATPTTMicData = caps.HasSetPTT && nativeMicDataPTT(string(out))
 		if caps.PortType == "none" && caps.PTTType == "" && !caps.HasGetFreq && !caps.HasSetFreq && len(caps.SupportedModes) == 0 {
 			lastErr = fmt.Errorf("%s 未返回可解析的 Hamlib capability", filepath.Base(candidate))
 			continue
@@ -382,6 +388,25 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 		return HamlibCapabilities{}, fmt.Errorf("读取 Hamlib 设备能力失败: %w", lastErr)
 	}
 	return HamlibCapabilities{}, fmt.Errorf("读取 Hamlib 设备能力失败")
+}
+
+func nativeMicDataPTT(output string) bool {
+	section := false
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "ptt_type:") {
+			section = true
+			continue
+		}
+		if section {
+			if _, value, ok := strings.Cut(line, "Value:"); ok {
+				return strings.TrimSpace(value) == "RIGMICDATA"
+			}
+			if line != "" && line[0] != ' ' && line[0] != '\t' {
+				return false
+			}
+		}
+	}
+	return false
 }
 
 // ListHamlibModels executes rigctld/rigctl -l and returns supported models.

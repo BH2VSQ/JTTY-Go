@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestAudioSourceMigrationPreservesBothProfiles(t *testing.T) {
+	r := DefaultSettings().Radio
+	r.Backend = "hamlib-local"
+	r.TXAudioSource = "Data"
+	r.NET = r.Profile()
+	r.NET.TXAudioSource = "Mic"
+	r = NormalizeRadio(r)
+	if r.TXAudioSource != "Rear" || r.Local.TXAudioSource != "Rear" || r.NET.TXAudioSource != "Front" {
+		t.Fatalf("%+v", r)
+	}
+}
+
 func TestBackendMigrationAndIndependentProfilePersistence(t *testing.T) {
 	for _, backend := range []string{"rigctld-net", "hamlib-net-rigctl", "hamlib-rigctld"} {
 		r := DefaultSettings().Radio

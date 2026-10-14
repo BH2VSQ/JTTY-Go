@@ -1,8 +1,10 @@
 package radio
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestParseHamlibModelList(t *testing.T) {
@@ -44,6 +46,55 @@ func TestParseHamlibModelList(t *testing.T) {
 	for i := 1; i < len(got); i++ {
 		if got[i-1].Label > got[i].Label {
 			t.Fatalf("models not sorted by display label: %q > %q", got[i-1].Label, got[i].Label)
+		}
+	}
+}
+
+func TestHumanRS232CapabilitiesWithCLIOverrides(t *testing.T) {
+	// rigctl -m 1020 -u: the CLI defaults PTT to None even though the
+	// FT-817 backend provides a native CAT PTT setter.
+	input := "PTT type:\tNone\nPort type:\tRS-232\nCan set Frequency:\tY\nCan get Frequency:\tY\nCan set PTT:\tY\nCan get PTT:\tY\nCan set Split Freq:\tE\nCan get Split Freq:\tE\n"
+	caps := ParseHamlibCapabilities(input, 1020)
+	if caps.PortType != "serial" || !caps.HasCATPTT || !caps.HasSetFreq || !caps.HasGetFreq || !caps.HasSetSplitFreq || !caps.HasGetSplitFreq {
+		t.Fatalf("real-format capability dump misread: %+v", caps)
+	}
+	if caps.HasCATPTTMicData {
+		t.Fatal("ordinary CAT PTT must not imply Mic/Data switching")
+	}
+	for _, spelling := range []string{"RS-232", "RS232", "Serial", "RIG_PORT_SERIAL"} {
+		if normalizeHamlibPortType(spelling) != "serial" {
+			t.Fatal(spelling)
+		}
+	}
+}
+
+func TestRealFT817ModelOnlyCapabilities(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// -u exits without opening a CAT device or issuing radio/PTT commands.
+	caps, err := HamlibModelCapabilities(ctx, bundledRuntime(t), 1020)
+	if err != nil || caps.PortType != "serial" || !caps.HasCATPTT || !caps.HasSetFreq {
+		t.Fatalf("FT-817 model capabilities: %+v error=%v", caps, err)
+	}
+	if caps.HasCATPTTMicData {
+		t.Fatal("FT-817 must not imply Mic/Data PTT")
+	}
+}
+
+func TestRealTS480NativeMicDataCapabilities(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	caps, err := HamlibModelCapabilities(ctx, bundledRuntime(t), 2028)
+	if err != nil || !caps.HasCATPTTMicData {
+		t.Fatalf("TS-480: %+v error=%v", caps, err)
+	}
+}
+
+func TestNativePTTValueNotDefaultOrCombo(t *testing.T) {
+	for _, value := range []string{"RIG", "None", "RIGMICDATA"} {
+		out := "ptt_type: description\n\tDefault: RIGMICDATA, Value: " + value + "\n\tCombo: RIG, RIGMICDATA\n"
+		if nativeMicDataPTT(out) != (value == "RIGMICDATA") {
+			t.Fatal(value)
 		}
 	}
 }

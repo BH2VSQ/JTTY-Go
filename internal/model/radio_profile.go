@@ -4,6 +4,15 @@ import "strings"
 
 const RadioConfigVersion = 2
 
+func NormalizeTXAudioSource(source string) string {
+	switch strings.ToUpper(strings.TrimSpace(source)) {
+	case "DATA", "REAR":
+		return "Rear"
+	default:
+		return "Front"
+	}
+}
+
 // Profile snapshots only connection and operating parameters, never nested profiles.
 func (r RadioSettings) Profile() RadioProfile {
 	return RadioProfile{RigName: r.RigName, RigModelID: r.RigModelID, RigctldPath: r.RigctldPath, Host: r.Host, Port: r.Port, SerialPort: r.SerialPort, Baud: r.Baud, DataBits: r.DataBits, StopBits: r.StopBits, Handshake: r.Handshake, PTTMethod: r.PTTMethod, PTTSerialPort: r.PTTSerialPort, SplitMode: r.SplitMode, TXAudioSource: r.TXAudioSource, ForceDTR: r.ForceDTR, ForceRTS: r.ForceRTS, PollIntervalSec: r.PollIntervalSec, Mode: r.Mode, PassbandHz: r.PassbandHz, ReadPowerSWR: r.ReadPowerSWR, HaltOnSWR: r.HaltOnSWR}
@@ -36,6 +45,7 @@ func (r *RadioSettings) ApplyProfile(p RadioProfile) {
 // NormalizeRadio preserves explicit backend selection. Legacy NET settings are
 // never inferred to be local just because a model ID is still present.
 func NormalizeRadio(r RadioSettings) RadioSettings {
+	r.TXAudioSource = NormalizeTXAudioSource(r.TXAudioSource)
 	backend := strings.ToLower(strings.TrimSpace(r.Backend))
 	legacyNone := backend == "hamlib-rigctld" && r.RigModelID <= 0 && !r.Enabled
 	switch backend {
@@ -92,6 +102,8 @@ func NormalizeRadio(r RadioSettings) RadioSettings {
 		r.NET.RigModelID = 0
 		r.NET.RigName = "NET rigctl"
 	}
+	r.Local.TXAudioSource = NormalizeTXAudioSource(r.Local.TXAudioSource)
+	r.NET.TXAudioSource = NormalizeTXAudioSource(r.NET.TXAudioSource)
 	if r.Backend == "hamlib-local" {
 		r.Local = r.Profile()
 	}

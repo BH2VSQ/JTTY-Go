@@ -656,14 +656,20 @@ func (a *App) Startup(ctx context.Context) {
 		a.emit(model.EventRadioTest, result)
 	})
 	wailsruntime.EventsOn(ctx, "radio:test-end", func(data ...interface{}) {
-		a.cancelHamlibOperations()
 		restore := true
+		cancelProbes := true
 		if len(data) > 0 {
 			if raw, ok := data[0].(map[string]interface{}); ok {
 				if v, exists := raw["restore"].(bool); exists {
 					restore = v
 				}
+				if v, exists := raw["cancelProbes"].(bool); exists {
+					cancelProbes = v
+				}
 			}
+		}
+		if cancelProbes {
+			a.cancelHamlibOperations()
 		}
 		a.closeTestRadio(restore)
 	})

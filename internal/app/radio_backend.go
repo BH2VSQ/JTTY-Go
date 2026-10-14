@@ -80,6 +80,9 @@ func (a *App) openConfiguredRadio(cfg model.RadioSettings) (radio.Radio, radio.H
 				args = append(args, "-p", cfg.PTTSerialPort)
 			}
 		}
+		if caps.HasCATPTTMicData && (cfg.PTTMethod == "Rigctl" || cfg.PTTMethod == "CAT") {
+			args = append(args, "-C", "ptt_type=RIGMICDATA")
+		}
 		managed, err := radio.StartManaged(ctx, executable, args, rc)
 		if err != nil {
 			return nil, caps, err
@@ -110,27 +113,24 @@ func (a *App) openConfiguredRadio(cfg model.RadioSettings) (radio.Radio, radio.H
 		actual.ModelID = cfg.RigModelID
 		caps = actual
 	}
-	source := strings.ToUpper(cfg.TXAudioSource)
-	pttValue := 1
-	if source == "DATA" || source == "REAR" || source == "MIC" {
-		if !caps.HasCATPTTMicData && (cfg.PTTMethod == "Rigctl" || cfg.PTTMethod == "CAT") {
-			_ = r.Close()
-			return nil, caps, fmt.Errorf("电台未明确支持麦克风/数据 PTT 选择，请选择默认音频输入")
-		}
-		if source == "MIC" {
-			pttValue = 2
-		} else {
-			pttValue = 3
-		}
-	}
 	if setter, ok := r.(interface{ SetPTTValue(int) }); ok {
-		setter.SetPTTValue(pttValue)
+		setter.SetPTTValue(catPTTValue(cfg, caps))
 	}
 	if _, err := r.Frequency(ctx); err != nil {
 		_ = r.Close()
 		return nil, caps, fmt.Errorf("读取频率: %w", err)
 	}
 	return r, caps, nil
+}
+
+// Match WSJT-X: front uses normal ON; rear uses ON_DATA only on MICDATA rigs.
+// Keep the saved preference when unsupported, but use ordinary CAT PTT.
+func catPTTValue(cfg model.RadioSettings, caps radio.HamlibCapabilities) int {
+	cat := strings.EqualFold(cfg.PTTMethod, "Rigctl") || strings.EqualFold(cfg.PTTMethod, "CAT")
+	if cat && caps.HasCATPTTMicData && model.NormalizeTXAudioSource(cfg.TXAudioSource) == "Rear" {
+		return 3
+	}
+	return 1
 }
 
 func configureSplit(ctx context.Context, r radio.Radio, on bool, hz int64) error {

@@ -10,7 +10,7 @@
   "info": {
     "companyName": "BH2VSQ",
     "productName": "JTTY-Go",
-    "productVersion": "5.36.15"
+    "productVersion": "5.36.16"
   },
   "frontend:dev:build": "npm run build",
   "frontend:dev:install": "npm install",

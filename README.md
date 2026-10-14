@@ -50,6 +50,8 @@ npm install
 - 本地 Hamlib：选择电台型号、设备路径及通信参数后，应用自动启动随包的 Windows amd64 `rigctld`，使用独立回环端口。
 - NET rigctl：连接已有服务器，应用不启动、更新或停止该服务器。
 - 两种后端分别保存连接及 PTT 配置，同一时刻使用一种。关闭电台控制仍可使用独立 VOX/串口 PTT。
+- 本地串口型号在左侧选择 CAT 串口；刷新与 RTS/DTR 使用同一本机串口列表，也可手动输入设备路径。不自动选择第一个串口，刷新保留已有选择。
+- CAT PTT 音频输入与 WSJT-X 一致：Front/Mic 使用普通 PTT，Rear/Data 仅在型号明确支持 Mic/Data PTT 时使用数据 PTT。普通 CAT PTT、RTS/DTR 和 VOX 不代表支持音频接口选择；NET 先测试连接获取服务器能力。旧 Mic/Data 设置分别迁移为 Front/Rear。
 
 ### Windows 安装程序打包依赖
 
