@@ -20,6 +20,7 @@
 - 未进行实际电台 CAT、串口 RTS/DTR、电台数据音频输入、声卡连续播放或 RF/PTT 实机测试。Dummy 结果不代表具体电台硬件已经适配通过。
 - 全仓库 `go vet` 仍报告 `internal/audio/output_windows.go`、`internal/audio/wasapi_windows.go` 中原有的两处 Windows unsafe.Pointer 警告；本次修改模块的 vet 通过。
 - 使用 Go 1.27.2、Wails 2.15.0、现有 MSYS2 gfortran/FFTW。新增工具、缓存和临时运行包均放在 H 盘。Inno 编译器静默安装被自动审批拒绝，改用已验证签名的官方安装文件进行便携解包，未运行该安装程序。
+- 临时工具清理命令被自动审批拒绝（仅返回 blocked by policy），因此 `H:\tools\jtty-go` 仍保留工具、缓存、独立 oracle 及解包测试目录；测试服务已停止。日志和截图位于项目 `.codex/verification/`。
 
 ## 交付与回滚
 
