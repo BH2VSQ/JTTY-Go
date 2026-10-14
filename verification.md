@@ -26,5 +26,7 @@
 - `dist/windows/JTTY-Go-portable-windows.zip`：包含应用、完整 `hamlib/` 和许可文件。
 - `dist/windows/installer/JTTY-Go-5.36.14-Setup.exe`：本地安装测试包，尚未执行安装/卸载回归。
 - 摘要见 `dist/windows/SHA256SUMS.txt`。校验清单同时覆盖包内应用及 Hamlib 可执行文件。
+- 便携 ZIP SHA-256：`cbafa6cffe57c7a0bfd60d25555f70ab0723a2921faab79f115bcd19cd9a2077`。
+- 安装包 SHA-256：`59095f01ce53aae060c73b516309bd6fd539a0b5b972cb097dcbe8e93916de48`。
 - 升级/回滚须替换完整应用包，禁止单独替换 DLL。回滚前备份用户配置；旧版本可能重新将本地后端迁移为 NET，因此应同时恢复对应旧配置。
 - `.codex/` 与 `docs/` 留在本地，不纳入本次代码提交。
