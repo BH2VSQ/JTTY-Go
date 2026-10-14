@@ -8,23 +8,37 @@ subroutine genjtty(umsg,itone,nsym)
   parameter (MAX_TONES=59*16)       !Max number of channel symbols
   character*80 umsg                 !User-formatted message
   integer itone(MAX_TONES)          !Array of tone frequencies for this message
+
+  interface
+     subroutine genjtty_profile(umsg,exchange_profile,itone,nsym,frame_starts,is_final)
+       use jtty_mod, only: MAX_FRAMES
+       character(len=80), intent(inout) :: umsg
+       integer, intent(in) :: exchange_profile
+       integer, intent(out) :: itone(59*MAX_FRAMES),nsym
+       integer, intent(out), optional :: frame_starts(MAX_FRAMES)
+       integer, intent(in), optional :: is_final
+     end subroutine genjtty_profile
+  end interface
+
   call genjtty_profile(umsg,JTTY_EXCHANGE_UNKNOWN,itone,nsym)
 
  return
 end subroutine genjtty
 
-subroutine genjtty_profile(umsg,exchange_profile,itone,nsym)
+subroutine genjtty_profile(umsg,exchange_profile,itone,nsym,frame_starts,is_final)
 
   use jtty_mod, only: pack_jtty,MAX_FRAMES
   implicit none
   character(len=80), intent(inout) :: umsg
   integer, intent(in) :: exchange_profile
   integer, intent(out) :: itone(59*MAX_FRAMES),nsym
+  integer, intent(out), optional :: frame_starts(MAX_FRAMES)
+  integer, intent(in), optional :: is_final
   character(len=34) :: frames(MAX_FRAMES)
   integer :: nframes
 
   nsym=0
-  call pack_jtty(umsg,frames,nframes,exchange_profile)
+  call pack_jtty(umsg,frames,nframes,exchange_profile,frame_starts,is_final)
   if(nframes.le.0) return
   call genjtty_frames(frames,nframes,itone,nsym)
 end subroutine genjtty_profile
@@ -70,7 +84,7 @@ end subroutine genjtty_frames
 subroutine genjtty_atoms_c(c_atoms,natoms,itone,nsym,status) bind(C,name='genjtty_atoms_c')
 
   use iso_c_binding, only: c_char,c_int,c_null_char
-  use packjt77_grammar, only: pack77_arrl_section_index
+  use packjt77_grammar, only: pack77_arrl_section_index,pack77_arrl_section_name
   use jtty_mod, only: jtty_source_atom,jtty_source_atom_c,JTTY_ATOM_CALL, &
        JTTY_ATOM_EXCH_NUM,JTTY_ATOM_EXCH_LOC,JTTY_ATOM_EXCH_PAIR, &
        JTTY_ATOM_CONTROL,JTTY_ATOM_GRID4,jtty_call_atom,jtty_exch_num_atom, &
@@ -119,7 +133,7 @@ subroutine genjtty_atoms_c(c_atoms,natoms,itone,nsym,status) bind(C,name='genjtt
         if(c_atoms(i)%subtype.ne.1) return
         if(c_atoms(i)%role.lt.0 .or. c_atoms(i)%role.gt.5) return
         section_index=pack77_arrl_section_index(descriptor_text)
-        if(section_index.lt.1) then
+        if(section_index.lt.1 .or. descriptor_text.ne.pack77_arrl_section_name(section_index)) then
            status=JTTY_ENCODE_UNKNOWN_SECTION
            return
         endif

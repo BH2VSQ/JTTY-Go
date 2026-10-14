@@ -44,6 +44,7 @@ type HamlibCapabilities struct {
 	HasSetSplitFreq         bool     `json:"hasSetSplitFreq"`
 	HasGetSplitMode         bool     `json:"hasGetSplitMode"`
 	HasSetSplitMode         bool     `json:"hasSetSplitMode"`
+	SupportedVFOs           []string `json:"supportedVFOs,omitempty"`
 	SupportedModes          []string `json:"supportedModes,omitempty"`
 }
 
@@ -182,7 +183,6 @@ func ParseHamlibCapabilities(output string, modelID int) HamlibCapabilities {
 		}
 		lower := strings.ToLower(line)
 		value := valueAfterLabel(line)
-		vlower := strings.ToLower(value)
 
 		switch {
 		case strings.HasPrefix(lower, "port type"):
@@ -244,30 +244,20 @@ func ParseHamlibCapabilities(output string, modelID int) HamlibCapabilities {
 			if v, ok := parseYesNo(value); ok {
 				c.HasCATPTTMicData = v
 			}
+		case strings.HasPrefix(lower, "vfo list"):
+			c.SupportedVFOs = strings.Fields(value)
 		case strings.HasPrefix(lower, "mode list"):
 			modeSeen = true
 			modeBuf = append(modeBuf, strings.Fields(value)...)
 		case modeSeen && strings.HasPrefix(lower, "\t"):
 			modeBuf = append(modeBuf, strings.Fields(value)...)
 		}
-		_ = vlower
 	}
 
-	// Hamlib's canonical PTT type is the strongest pre-instantiation signal for
-	// WSJT-X's has_CAT_PTT() capability. Require both a CAT PTT type and a
-	// concrete setter so an incomplete backend remains disabled in the GUI.
-	c.HasCATPTT = strings.Contains(c.PTTType, "RIG_PTT_RIG") && c.HasSetPTT
-
-	// Hamlib does not expose the WSJT-X mic/data switch capability as a separate
-	// standard dump_caps field on all backends. Where a backend does expose an
-	// explicit field, honor it; otherwise use the CAT PTT setter as the same
-	// conservative capability surface used by the rigctld integration.
-	if !strings.Contains(strings.ToLower(output), "ptt mic data") &&
-		!strings.Contains(strings.ToLower(output), "ptt_mic_data") &&
-		!strings.Contains(strings.ToLower(output), "set_ptt_mic") &&
-		!strings.Contains(strings.ToLower(output), "set_ptt_data") {
-		c.HasCATPTTMicData = c.HasCATPTT
-	}
+	// rigctl/rigctld overwrite caps->ptt_type with their command-line default
+	// (NONE when -P is absent). The backend setter reports actual CAT support.
+	c.HasCATPTT = c.HasSetPTT
+	c.HasCATPTTMicData = c.HasSetPTT && (c.HasCATPTTMicData || strings.Contains(c.PTTType, "MIC/DATA") || strings.Contains(c.PTTType, "MICDATA"))
 
 	for _, token := range modeBuf {
 		token = strings.TrimSpace(strings.Trim(token, ",;"))
@@ -303,11 +293,11 @@ func valueAfterLabel(line string) string {
 func normalizeHamlibPortType(value string) string {
 	v := strings.ToUpper(strings.TrimSpace(value))
 	switch {
-	case strings.Contains(v, "RIG_PORT_SERIAL"):
+	case strings.Contains(v, "RIG_PORT_SERIAL") || v == "SERIAL" || v == "RS-232" || v == "RS232":
 		return "serial"
-	case strings.Contains(v, "RIG_PORT_NETWORK"):
+	case strings.Contains(v, "RIG_PORT_NETWORK") || strings.Contains(v, "NETWORK"):
 		return "network"
-	case strings.Contains(v, "RIG_PORT_USB"):
+	case strings.Contains(v, "RIG_PORT_USB") || v == "USB":
 		return "usb"
 	case strings.Contains(v, "TCI"):
 		return "tci"
@@ -317,12 +307,17 @@ func normalizeHamlibPortType(value string) string {
 }
 
 func containsCapabilityName(line, name string) bool {
-	return strings.Contains(line, "can "+name) || strings.Contains(line, "can"+name) || strings.Contains(line, name+":")
+	human := strings.ReplaceAll(name, "_", " ")
+	longHuman := strings.ReplaceAll(human, "freq", "frequency")
+	return strings.Contains(line, "can "+human+":") || strings.Contains(line, "can "+longHuman+":") || strings.Contains(line, "can "+name) || strings.Contains(line, "can"+name) || strings.Contains(line, name+":")
 }
 
 func parseYesNo(value string) (bool, bool) {
 	v := strings.ToLower(strings.TrimSpace(value))
 	v = strings.TrimSpace(strings.Trim(v, "[]()"))
+	if v == "e" {
+		return true, true
+	} // Supported through Hamlib emulation.
 	if strings.HasPrefix(v, "y") || strings.HasPrefix(v, "yes") || strings.HasPrefix(v, "true") || strings.HasPrefix(v, "1 ") || v == "1" {
 		return true, true
 	}
@@ -371,7 +366,9 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 	}
 	var lastErr error
 	for _, candidate := range candidates {
-		cmd := newHamlibCommandContext(ctx, candidate, "-m", strconv.Itoa(modelID), "-u")
+		// -L reports the native PTT Value before the CLI overwrites it; -u
+		// prints capabilities and exits before rig_open, without touching CAT.
+		cmd := newHamlibCommandContext(ctx, candidate, "-m", strconv.Itoa(modelID), "-L", "-u")
 		cmd.Dir = filepath.Dir(candidate)
 		cmd.Env = prependPath(cmd.Environ(), cmd.Dir)
 		out, err := cmd.CombinedOutput()
@@ -380,6 +377,7 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 			continue
 		}
 		caps := ParseHamlibCapabilities(string(out), modelID)
+		caps.HasCATPTTMicData = caps.HasSetPTT && nativeMicDataPTT(string(out))
 		if caps.PortType == "none" && caps.PTTType == "" && !caps.HasGetFreq && !caps.HasSetFreq && len(caps.SupportedModes) == 0 {
 			lastErr = fmt.Errorf("%s 未返回可解析的 Hamlib capability", filepath.Base(candidate))
 			continue
@@ -390,6 +388,25 @@ func HamlibModelCapabilities(ctx context.Context, executable string, modelID int
 		return HamlibCapabilities{}, fmt.Errorf("读取 Hamlib 设备能力失败: %w", lastErr)
 	}
 	return HamlibCapabilities{}, fmt.Errorf("读取 Hamlib 设备能力失败")
+}
+
+func nativeMicDataPTT(output string) bool {
+	section := false
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "ptt_type:") {
+			section = true
+			continue
+		}
+		if section {
+			if _, value, ok := strings.Cut(line, "Value:"); ok {
+				return strings.TrimSpace(value) == "RIGMICDATA"
+			}
+			if line != "" && line[0] != ' ' && line[0] != '\t' {
+				return false
+			}
+		}
+	}
+	return false
 }
 
 // ListHamlibModels executes rigctld/rigctl -l and returns supported models.

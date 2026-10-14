@@ -13,7 +13,35 @@ type AudioSettings struct {
 	RecordDirectory string `json:"recordDirectory"`
 }
 
+type RadioProfile struct {
+	RigName         string `json:"rigName"`
+	RigModelID      int    `json:"rigModelId"`
+	RigctldPath     string `json:"rigctldPath"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	SerialPort      string `json:"serialPort"`
+	Baud            int    `json:"baud"`
+	DataBits        int    `json:"dataBits"`
+	StopBits        int    `json:"stopBits"`
+	Handshake       string `json:"handshake"`
+	PTTMethod       string `json:"pttMethod"`
+	PTTSerialPort   string `json:"pttSerialPort"`
+	SplitMode       string `json:"splitMode"`
+	TXAudioSource   string `json:"txAudioSource"`
+	ForceDTR        string `json:"forceDtr"`
+	ForceRTS        string `json:"forceRts"`
+	PollIntervalSec int    `json:"pollIntervalSec"`
+	Mode            string `json:"mode"`
+	PassbandHz      int    `json:"passbandHz"`
+	ReadPowerSWR    bool   `json:"readPowerSWR"`
+	HaltOnSWR       bool   `json:"haltOnSWR"`
+}
+
 type RadioSettings struct {
+	ConfigVersion int          `json:"configVersion"`
+	Local         RadioProfile `json:"local"`
+	NET           RadioProfile `json:"net"`
+
 	Backend         string `json:"backend"`
 	Enabled         bool   `json:"enabled"`
 	RigName         string `json:"rigName"`

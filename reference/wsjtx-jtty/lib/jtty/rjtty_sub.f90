@@ -54,7 +54,7 @@ subroutine rjtty_core(iwave,kz,nsps,nfa,nfb,f0,ftol,istart0,istop)
 999 return
 end subroutine rjtty_core
 
-subroutine jtty_get_updates(text_blocks,message_ids,frequencies,start_tsync,eom,count)
+subroutine jtty_get_updates(text_blocks,message_ids,frequencies,start_tsync,eom,snr,count)
 
   use iso_fortran_env, only: int64
   use jtty_mdec
@@ -65,6 +65,7 @@ subroutine jtty_get_updates(text_blocks,message_ids,frequencies,start_tsync,eom,
   real, intent(out)             :: frequencies(BATCH_SIZE)
   real, intent(out)             :: start_tsync(BATCH_SIZE)
   logical*1, intent(out)        :: eom(BATCH_SIZE)
+  integer, intent(out)          :: snr(BATCH_SIZE)
   integer, intent(out)          :: count
   character(len=MESSAGE_LENGTH) :: msg
   integer :: i,index,offset
@@ -74,6 +75,7 @@ subroutine jtty_get_updates(text_blocks,message_ids,frequencies,start_tsync,eom,
   frequencies=0.0
   start_tsync=0.0
   eom=.false.
+  snr=0
   count=min(npending,BATCH_SIZE)
 
   do i=1,count
@@ -85,6 +87,7 @@ subroutine jtty_get_updates(text_blocks,message_ids,frequencies,start_tsync,eom,
      frequencies(i)=pending_updates(index)%f1
      start_tsync(i)=pending_updates(index)%start_tsync
      eom(i)=pending_updates(index)%complete
+     snr(i)=nint(pending_updates(index)%snr)
   enddo
 
   ! Pending membership is the delivery guarantee; remove records only after copying them out.

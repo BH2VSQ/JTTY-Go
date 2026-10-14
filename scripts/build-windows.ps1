@@ -12,5 +12,7 @@ if (-not (Get-Command wails -ErrorAction SilentlyContinue)) {
 
 wails doctor
 wails build -platform windows/amd64 -clean
+if ($LASTEXITCODE -ne 0) { throw 'Wails build failed' }
+& (Join-Path $PSScriptRoot 'stage-hamlib.ps1') -Destination (Join-Path $PSScriptRoot '..\build\bin\hamlib')
 
 Write-Host "Build completed. Check build/bin for JTTY-Go.exe" -ForegroundColor Green

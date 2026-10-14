@@ -17,8 +17,8 @@ type Reference struct {
 
 var WSJTXReference = Reference{
 	Project:     "WSJT-X",
-	Release:     "3.2.0-rc1",
-	Commit:      "567ad29",
+	Release:     "release/3.3 snapshot 2026-10-13",
+	Commit:      "9d059511f77e2d1be746ebfeaa7f88e77c1babb7",
 	License:     "GPL-3.0",
 	Mode:        "JTTY",
 	Baud:        31.25,

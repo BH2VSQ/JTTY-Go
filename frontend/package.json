@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "vite build"
+    "build": "vite build",
+    "test:radio": "node tests/radio-settings.mjs"
   },
   "devDependencies": {
     "vite": "^7.1.7",

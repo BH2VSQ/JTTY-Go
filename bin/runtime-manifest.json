@@ -1,0 +1,12 @@
+{
+  "version": "4.7.3~rc 2026-09-22T20:59:11Z d034b2365 windows-amd64",
+  "source": "https://github.com/Hamlib/Hamlib/tree/d034b2365",
+  "files": {
+    "libgcc_s_seh-1.dll": "172cfdc9d83703ec0a0ca2cee08f6cf2a166b801717ee51a56b3a63b36bc2f83",
+    "libusb-1.0.dll": "86d5d599c427d5c168bea98f24584520be6187df142dd0ff1def4a834848a0a2",
+    "rigctld.exe": "60173d9e5f814b015cede33512126da9581832875ef885619fe547fc9628666e",
+    "libwinpthread-1.dll": "fc3cd567190f3f24e8201c2e1602f7d1f1e583a572efb7dbd8746d7928538e94",
+    "rigctl.exe": "b9cccb886716796b552fea81632d3c25c1603cd271c6c2f5ac6938e7a653b86c",
+    "libhamlib-4.dll": "851972eec21648c162c2455b263328debd5cb6ad7199b192f44dc19d64340a07"
+  }
+}

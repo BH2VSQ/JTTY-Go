@@ -241,6 +241,7 @@ export namespace model {
 	    message: string;
 	    callsigns?: Callsign[];
 	    confidence: number;
+	    jttyTerminal?: string;
 	    jttyMessageId?: number;
 	
 	    static createFrom(source: any = {}) {
@@ -258,6 +259,7 @@ export namespace model {
 	        this.message = source["message"];
 	        this.callsigns = this.convertValues(source["callsigns"], Callsign);
 	        this.confidence = source["confidence"];
+	        this.jttyTerminal = source["jttyTerminal"];
 	        this.jttyMessageId = source["jttyMessageId"];
 	    }
 	
@@ -357,7 +359,62 @@ export namespace model {
 	        this.global = source["global"];
 	    }
 	}
+	export class RadioProfile {
+	    rigName: string;
+	    rigModelId: number;
+	    rigctldPath: string;
+	    host: string;
+	    port: number;
+	    serialPort: string;
+	    baud: number;
+	    dataBits: number;
+	    stopBits: number;
+	    handshake: string;
+	    pttMethod: string;
+	    pttSerialPort: string;
+	    splitMode: string;
+	    txAudioSource: string;
+	    forceDtr: string;
+	    forceRts: string;
+	    pollIntervalSec: number;
+	    mode: string;
+	    passbandHz: number;
+	    readPowerSWR: boolean;
+	    haltOnSWR: boolean;
+
+	    static createFrom(source: any = {}) {
+	        return new RadioProfile(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rigName = source["rigName"];
+	        this.rigModelId = source["rigModelId"];
+	        this.rigctldPath = source["rigctldPath"];
+	        this.host = source["host"];
+	        this.port = source["port"];
+	        this.serialPort = source["serialPort"];
+	        this.baud = source["baud"];
+	        this.dataBits = source["dataBits"];
+	        this.stopBits = source["stopBits"];
+	        this.handshake = source["handshake"];
+	        this.pttMethod = source["pttMethod"];
+	        this.pttSerialPort = source["pttSerialPort"];
+	        this.splitMode = source["splitMode"];
+	        this.txAudioSource = source["txAudioSource"];
+	        this.forceDtr = source["forceDtr"];
+	        this.forceRts = source["forceRts"];
+	        this.pollIntervalSec = source["pollIntervalSec"];
+	        this.mode = source["mode"];
+	        this.passbandHz = source["passbandHz"];
+	        this.readPowerSWR = source["readPowerSWR"];
+	        this.haltOnSWR = source["haltOnSWR"];
+	    }
+	}
 	export class RadioSettings {
+	    configVersion: number;
+	    local: RadioProfile;
+	    net: RadioProfile;
 	    backend: string;
 	    enabled: boolean;
 	    rigName: string;
@@ -388,6 +445,9 @@ export namespace model {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.configVersion = source["configVersion"];
+	        this.local = this.convertValues(source["local"], RadioProfile);
+	        this.net = this.convertValues(source["net"], RadioProfile);
 	        this.backend = source["backend"];
 	        this.enabled = source["enabled"];
 	        this.rigName = source["rigName"];
@@ -412,6 +472,24 @@ export namespace model {
 	        this.readPowerSWR = source["readPowerSWR"];
 	        this.haltOnSWR = source["haltOnSWR"];
 	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class WaterfallSettings {
 	    minHz: number;

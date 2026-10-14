@@ -1,5 +1,26 @@
 JTTY source encoding
 
+This is the canonical specification for JTTY framing, source encoding, and
+source interfaces. It defines the wire grammar and the rules used by automatic
+text packing, native function keys, and tagged N1MM actions. For a design
+overview and contest examples, see jtty_design.md. N1MM setup and macro
+examples are in jtty_n1mm_integration.md.
+
+Frame and waveform
+
+A transmission contains one or more 1.888-second frames. Each frame carries
+a 34-bit payload. A 12-bit CRC extends this payload to 46 bits. A tail-biting,
+rate-1/2 convolutional code with constraint length K=10 produces 92 coded bits.
+
+The waveform is Gaussian-smoothed four-tone frequency-shift keying (4-GFSK),
+with two coded bits per tone symbol. A frame contains a 13-symbol
+synchronization sequence followed by 46 coded symbols. At 12000/384 = 31.25
+baud, its duration is (13+46)/31.25 = 1.888 seconds. Nominal half-power
+bandwidth is 125 Hz. The occupied bandwidth (99% of transmitted power) is
+127 Hz.
+
+Source bits and validity
+
 Each JTTY frame conveys 34 source bits. Bits are numbered from left to right,
 most significant first. Bits 1-32 are the message grammar, bit 33 is reserved
 and shall be zero, and bit 34 is the universal end-of-message (EOM) flag. EOM
@@ -183,18 +204,21 @@ Canonical atom sequences
 Structured atoms are rendered independently and supply one implicit trailing
 space; TEXT5 characters are appended verbatim. The final trailing space or
 TEXT5 padding is not part of the displayed message. The receiver truncates
-the accumulated display at 80 characters. A sender
-sets bit 33 to zero on every atom and bit 34 only on the last atom. Queuing a
-second native message does not add a TEXT5 spacing atom.
+the accumulated display at 80 characters. A sender sets bit 33 to zero on
+every atom and bit 34 only on the last atom. Queuing a second native message
+does not add a TEXT5 spacing atom.
 
-Ordinary keyboard text, externally queued strings, and N1MM/MMTTY strings use
-the literal source interface. They are normalized to uppercase, leading,
-trailing, and repeated ASCII spaces are removed, and unsupported characters
-become '#'. The literal wrapper accepts an 80-character input field, so longer
-caller strings are truncated before normalization. Automatic packing minimizes
-the frame count while preserving this text exactly after any explicit RTTY
-Roundup serial normalization described below. The result is
-at most sixteen frames because TEXT5 is always available as a fallback.
+Automatic text packing
+
+Ordinary keyboard text, sjtty input, externally queued strings, and untagged
+N1MM/MMTTY strings use the literal source interface. They are normalized to
+uppercase, leading, trailing, and repeated ASCII spaces are removed, and
+unsupported characters become '#'. The literal wrapper accepts an 80-character
+input field, so longer caller strings are truncated before normalization.
+Automatic packing minimizes the frame count while preserving this text exactly
+after any explicit RTTY Roundup serial normalization described below. The
+result is at most sixteen frames because TEXT5 is always available as a fallback.
+Unrecognized "599 ..." text remains available through TEXT5.
 
 Candidates at complete token boundaries are:
 
@@ -210,12 +234,11 @@ Candidates at complete token boundaries are:
 
 Every candidate must pass codec pack/unpack validation and render exactly as
 its span in the normalized text. These context-free candidates remain
-available under every
-exchange profile. The GUI captures Unknown, Field Day, or RTTY Roundup from
-the existing special operating activity when a message is submitted. No
-activity means Unknown; the native macro default of SERIAL does not apply to
-automatic text recognition. Field Day adds no candidates because CLASS_SECTION
-is already self-identifying.
+available under every exchange profile. The GUI captures Unknown, Field Day,
+or RTTY Roundup from the existing special operating activity when a message is
+submitted. No activity means Unknown; the native macro default of SERIAL does
+not apply to automatic text recognition. Field Day adds no candidates because
+CLASS_SECTION is already self-identifying.
 
 RTTY Roundup additionally considers full "599 <number>" as SERIAL and full
 "599 <location>" as STATE_PROVINCE under the existing native exchange rules.
@@ -236,14 +259,15 @@ is per-message encoder context, not a new configuration or wire field.
 
 A dynamic program over source-character offsets selects a minimum-frame
 sequence of candidates and TEXT5. An interior TEXT5 atom consumes exactly five
-characters; only the final TEXT5 atom may be padded. A structured candidate
-consumes its rendering plus one source space when another token follows,
-matching the receiver's implicit separator. Equal-cost choices prefer a
-structured atom, then the longest consumed span, then ascending atom
-kind/subtype/role. Thus equally compact SERIAL and STATE_PROVINCE candidates
-win over their generic equivalents under RTTY Roundup. This minimizes frames
-under the recognition policy, not
-under hypothetical knowledge of the contest exchange's meaning.
+characters; only the final TEXT5 atom may be padded. Interior padding cannot
+be used to reach a compact candidate because it would change the text.
+A structured candidate consumes its rendering plus one source space when
+another token follows, matching the receiver's implicit separator.
+Equal-cost choices prefer a structured atom, then the longest consumed span,
+then ascending atom kind/subtype/role. Thus equally compact SERIAL and
+STATE_PROVINCE candidates win over their generic equivalents under RTTY
+Roundup. This minimizes frames under the recognition policy, not under
+hypothetical knowledge of the contest exchange's meaning.
 
 For example, "CQ K1ABC CQ", "599 123", "599 MA", "599 FN42", and "1D EMA"
 each use one frame. Under Unknown or Field Day, "599 001" and "599 05" need
@@ -258,6 +282,8 @@ sjtty defaults to Unknown. The optional leading argument
 --exchange-profile=unknown|field-day|rtty-roundup applies to both its
 one-message packing and eight-argument waveform invocations. An invalid
 profile value is an error.
+
+Native function keys
 
 The eight shipped JTTY function-key templates are a separate NativeMacro
 contract. Current templates and control phrases match after case folding and
@@ -311,9 +337,10 @@ start of the transmitted text, after the normal {TX} command:
     [[JTTY:<ACTION>]]<payload>
 
 N1MM expands {MYCALL}, ! or {CALL}, and {EXCH}; WSJT-X then parses the expanded
-payload under the selected action and active profile. The tag must begin at the
-first non-space character; tag and action matching is case-insensitive. The
-marker is transport metadata and is not transmitted. Assigned actions are:
+payload, normalizing whitespace and case, under the selected action and active
+profile. The tag must begin at the first non-space character; tag and action
+matching is case-insensitive. The marker is transport metadata and is not
+transmitted. Assigned actions are:
 
 --------------------------------------------------------------------------------
 Action          Expanded payload                   Native meaning
@@ -336,13 +363,13 @@ rules as %E, except that tagged values are already expanded: RTTY "DX" is a
 two-letter location, and the local-configuration "DX" and "#" serial sentinels
 do not apply. It contains the exchange value only: the action supplies CQ, TU,
 TU NOW, and canonical full-exchange report text where applicable. GRID requires
-a valid four-character Maidenhead locator. CONTROL requires one exact
+exactly one valid four-character Maidenhead locator. CONTROL requires one exact
 registered phrase from the CONTROL table above. An untagged N1MM message uses
 the literal source interface with automatic packing described above.
-A tag-shaped substring later in a message has no
-special meaning. An unknown or malformed leading JTTY tag, an unsupported
-action, invalid payload, or profile mismatch is rejected rather than put on
-the air as literal bracket text.
+A tag-shaped substring later in a message has no special meaning. An unknown
+or malformed leading JTTY tag, unsupported action, missing field, invalid call,
+invalid exchange or grid, unregistered control phrase, or profile mismatch is
+rejected rather than put on the air as literal bracket text.
 
 Representative 34-bit vectors
 
@@ -366,15 +393,3 @@ CONTROL AGN?                    0000000000000000000000000001001001  0x000000049
 GRID4 field-only FN42           0001001010000110011000000001001001  0x04A198049
 TEXT5 HELLO                     0100010011100101010101010110001101  0x11395558D
 --------------------------------------------------------------------------------
-
-Compatibility
-
-This version deliberately replaces the earlier i2=2 encoding, which meant the
-literal prefix "599 " followed by five six-bit characters. There is no version
-discriminator: an old receiver will render new STRUCT30 payload bits as
-arbitrary text following "599 ", while some old i2=2 frames happen to satisfy
-the new STRUCT30 structural rules and will be accepted with a different
-meaning by a new receiver. JTTY is unreleased, so this incompatibility is
-intentional and no legacy decoder mode is retained. Automatic text packing
-uses only the current grammar; unrecognized "599 ..." text remains available
-through TEXT5.

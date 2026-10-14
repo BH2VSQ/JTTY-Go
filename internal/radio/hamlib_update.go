@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -186,11 +184,10 @@ func HamlibStatusWithExecutableContext(ctx context.Context, arch, installDir, ex
 	status := HamlibUpdateStatus{Architecture: arch, DLLPath: dll, BackupPath: backup, BackupExists: fileExists(backup), SourceURL: hamlibURL(arch)}
 	if fi, err := os.Stat(dll); err == nil {
 		status.UpdatedAt = fi.ModTime().UTC().Format(time.RFC3339)
-		if version, probeErr := ProbeHamlibDLLVersion(dll); probeErr == nil {
-			status.DLLVersion = version
-			status.DLLVerified = true
-		} else if status.Note == "" {
-			status.Note = probeErr.Error()
+		// Version is read from the verified helper process. Loading a DLL into
+		// the GUI just to inspect a C pointer is neither necessary nor safe.
+		if err := VerifyRuntime(dir); err != nil {
+			status.Note = err.Error()
 		}
 	} else if status.Note == "" {
 		status.Note = "未找到 libhamlib-4.dll"
@@ -223,221 +220,10 @@ func HamlibStatusWithExecutableContext(ctx context.Context, arch, installDir, ex
 }
 
 func UpdateHamlib(ctx context.Context, arch, installDir string) (HamlibUpdateStatus, error) {
-	if runtime.GOOS != "windows" {
-		return HamlibUpdateStatus{}, fmt.Errorf("Hamlib update only available on Windows")
-	}
-	if arch != "32" && arch != "64" {
-		arch = "64"
-	}
-	dir := installDir
-	if dir == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return HamlibUpdateStatus{}, err
-		}
-		dir = filepath.Dir(exe)
-	}
-	dir, _ = filepath.Abs(dir)
-	dll := filepath.Join(dir, "libhamlib-4.dll")
-	backup := filepath.Join(dir, "libhamlib-4_old.dll")
-	tmp := filepath.Join(dir, "libhamlib-4_new.dll")
-	_ = os.Remove(tmp)
-
-	url := hamlibURL(arch)
-	setHamlibHeaders := func(req *http.Request) {
-		req.Header.Set("User-Agent", "Downloading latest libhamlib-4.dll")
-		req.Header.Set("Accept", "*/*")
-	}
-
-	headReq, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		return HamlibUpdateStatus{}, err
-	}
-	setHamlibHeaders(headReq)
-	headResp, err := http.DefaultClient.Do(headReq)
-	if err != nil {
-		return HamlibUpdateStatus{}, fmt.Errorf("check Hamlib download: %w", err)
-	}
-	headResp.Body.Close()
-	if headResp.StatusCode < 200 || headResp.StatusCode >= 300 {
-		if headResp.StatusCode == http.StatusForbidden {
-			return HamlibUpdateStatus{}, fmt.Errorf("check Hamlib download: HTTP 403 Forbidden")
-		}
-		return HamlibUpdateStatus{}, fmt.Errorf("check Hamlib download: HTTP %s", headResp.Status)
-	}
-
-	getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return HamlibUpdateStatus{}, err
-	}
-	setHamlibHeaders(getReq)
-	resp, err := http.DefaultClient.Do(getReq)
-	if err != nil {
-		return HamlibUpdateStatus{}, fmt.Errorf("download Hamlib: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusForbidden {
-			return HamlibUpdateStatus{}, fmt.Errorf("download Hamlib: HTTP 403 Forbidden")
-		}
-		return HamlibUpdateStatus{}, fmt.Errorf("download Hamlib: HTTP %s", resp.Status)
-	}
-
-	f, err := os.Create(tmp)
-	if err != nil {
-		return HamlibUpdateStatus{}, err
-	}
-	_, copyErr := io.Copy(f, resp.Body)
-	closeErr := f.Close()
-	if copyErr != nil {
-		_ = os.Remove(tmp)
-		return HamlibUpdateStatus{}, copyErr
-	}
-	if closeErr != nil {
-		_ = os.Remove(tmp)
-		return HamlibUpdateStatus{}, closeErr
-	}
-	if fi, err := os.Stat(tmp); err != nil || fi.Size() < 1024*1024 {
-		_ = os.Remove(tmp)
-		return HamlibUpdateStatus{}, fmt.Errorf("downloaded Hamlib DLL is unexpectedly small")
-	}
-	if version, err := ProbeHamlibDLLVersion(tmp); err != nil {
-		_ = os.Remove(tmp)
-		return HamlibUpdateStatus{}, fmt.Errorf("downloaded Hamlib DLL cannot be loaded: %w", err)
-	} else if strings.TrimSpace(version) == "" {
-		_ = os.Remove(tmp)
-		return HamlibUpdateStatus{}, fmt.Errorf("downloaded Hamlib DLL returned no version")
-	}
-
-	if fileExists(backup) {
-		if err := removeWithRetry(backup); err != nil {
-			_ = os.Remove(tmp)
-			return HamlibUpdateStatus{}, fmt.Errorf("remove old Hamlib backup: %w", err)
-		}
-	}
-	if fileExists(dll) {
-		if err := renameWithRetry(dll, backup); err != nil {
-			if isSharingViolation(err) {
-				stopHamlibClients(ctx)
-				err = renameWithRetry(dll, backup)
-			}
-			if err != nil {
-				_ = os.Remove(tmp)
-				return HamlibUpdateStatus{}, fmt.Errorf("backup current Hamlib: %w; the Hamlib DLL may still be in use by rigctld.exe or another process", err)
-			}
-		}
-	}
-	if err := renameWithRetry(tmp, dll); err != nil {
-		if isSharingViolation(err) {
-			stopHamlibClients(ctx)
-			err = renameWithRetry(tmp, dll)
-		}
-		if err != nil {
-			if fileExists(backup) && !fileExists(dll) {
-				_ = renameWithRetry(backup, dll)
-			}
-			if isSharingViolation(err) {
-				return HamlibUpdateStatus{}, fmt.Errorf("install new Hamlib: %w; the DLL is still in use, close rigctld.exe/other Hamlib programs and retry", err)
-			}
-			return HamlibUpdateStatus{}, fmt.Errorf("install new Hamlib: %w", err)
-		}
-	}
-
-	status, statusErr := HamlibStatusWithExecutable(arch, dir, "")
-	if statusErr != nil {
-		return HamlibUpdateStatus{}, statusErr
-	}
-	return status, nil
+	return HamlibUpdateStatus{}, fmt.Errorf("Hamlib 随完整应用包升级，禁止单 DLL 替换")
 }
-
 func RevertHamlib(arch, installDir string) (HamlibUpdateStatus, error) {
-	if runtime.GOOS != "windows" {
-		return HamlibUpdateStatus{}, fmt.Errorf("Hamlib update only available on Windows")
-	}
-	dir := installDir
-	if dir == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return HamlibUpdateStatus{}, err
-		}
-		dir = filepath.Dir(exe)
-	}
-	dir, _ = filepath.Abs(dir)
-	dll := filepath.Join(dir, "libhamlib-4.dll")
-	backup := filepath.Join(dir, "libhamlib-4_old.dll")
-	staged := filepath.Join(dir, "libhamlib-4_new.dll")
-	if !fileExists(backup) {
-		return HamlibStatus(arch, dir)
-	}
-	_ = os.Remove(staged)
-	if fileExists(dll) {
-		if err := renameWithRetry(dll, staged); err != nil {
-			if isSharingViolation(err) {
-				stopHamlibClients(context.Background())
-				err = renameWithRetry(dll, staged)
-			}
-			if err != nil {
-				return HamlibUpdateStatus{}, fmt.Errorf("stage current Hamlib: %w; the DLL may still be in use by rigctld.exe or another process", err)
-			}
-		}
-	}
-	if err := renameWithRetry(backup, dll); err != nil {
-		if fileExists(staged) {
-			_ = renameWithRetry(staged, dll)
-		}
-		return HamlibUpdateStatus{}, err
-	}
-	return HamlibStatus(arch, dir)
-}
-
-func renameWithRetry(oldPath, newPath string) error {
-	var last error
-	for i := 0; i < 20; i++ {
-		if err := os.Rename(oldPath, newPath); err == nil {
-			return nil
-		} else {
-			last = err
-		}
-		time.Sleep(150 * time.Millisecond)
-	}
-	return last
-}
-
-func isSharingViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "being used by another process") ||
-		strings.Contains(msg, "process cannot access the file") ||
-		strings.Contains(msg, "sharing violation")
-}
-
-func stopHamlibClients(ctx context.Context) {
-	if runtime.GOOS != "windows" {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	for _, image := range []string{"rigctld.exe", "rigctl.exe"} {
-		cmd := newHamlibCommandContext(ctx, "taskkill", "/F", "/T", "/IM", image)
-		_ = cmd.Run()
-	}
-	time.Sleep(300 * time.Millisecond)
-}
-
-func removeWithRetry(path string) error {
-	var last error
-	for i := 0; i < 20; i++ {
-		err := os.Remove(path)
-		if err == nil || os.IsNotExist(err) {
-			return nil
-		}
-		last = err
-		time.Sleep(150 * time.Millisecond)
-	}
-	return last
+	return HamlibUpdateStatus{}, fmt.Errorf("请安装完整的历史应用包以回滚 Hamlib")
 }
 
 func SaveHamlibStatus(path string, status HamlibUpdateStatus) error {

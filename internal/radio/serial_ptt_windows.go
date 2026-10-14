@@ -5,6 +5,7 @@ package radio
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -17,8 +18,6 @@ const (
 	openExisting       = 3
 	genericRead        = 0x80000000
 	genericWrite       = 0x40000000
-	fileShareRead      = 1
-	fileShareWrite     = 2
 	invalidHandleValue = ^uintptr(0)
 )
 
@@ -29,26 +28,37 @@ var (
 	escapeComm  = k32.NewProc("EscapeCommFunction")
 )
 
-type windowsPTTSerial struct{ h uintptr }
+type windowsPTTSerial struct {
+	h    uintptr
+	port string
+	mu   sync.Mutex
+}
 
 func NewPTTSerial() PTTSerial { return &windowsPTTSerial{} }
 func (p *windowsPTTSerial) open(port string) error {
-	if p.h != 0 {
+	port = normalizeCOMPort(port)
+	if p.h != 0 && strings.EqualFold(port, p.port) {
 		return nil
 	}
-	port = normalizeCOMPort(port)
+	if p.h != 0 {
+		p.closeLocked()
+	}
 	if port == "" {
 		return fmt.Errorf("PTT 串口为空")
 	}
 	name, _ := syscall.UTF16PtrFromString(port)
-	r, _, e := createFileW.Call(uintptr(unsafe.Pointer(name)), genericRead|genericWrite, fileShareRead|fileShareWrite, 0, openExisting, 0, 0)
+	// Win32 communications handles require exclusive access (share mode zero).
+	r, _, e := createFileW.Call(uintptr(unsafe.Pointer(name)), genericRead|genericWrite, 0, 0, openExisting, 0, 0)
 	if r == invalidHandleValue {
 		return fmt.Errorf("打开 PTT 串口 %s: %v", port, e)
 	}
 	p.h = r
+	p.port = port
 	return nil
 }
 func (p *windowsPTTSerial) Set(port, method string, on bool) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err := p.open(port); err != nil {
 		return err
 	}
@@ -76,11 +86,20 @@ func (p *windowsPTTSerial) Set(port, method string, on bool) error {
 	return nil
 }
 func (p *windowsPTTSerial) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closeLocked()
+}
+
+func (p *windowsPTTSerial) closeLocked() error {
 	if p.h == 0 {
 		return nil
 	}
+	_, _, _ = escapeComm.Call(p.h, clrDTR)
+	_, _, _ = escapeComm.Call(p.h, clrRTS)
 	r, _, e := closeHandle.Call(p.h)
 	p.h = 0
+	p.port = ""
 	if r == 0 {
 		return e
 	}

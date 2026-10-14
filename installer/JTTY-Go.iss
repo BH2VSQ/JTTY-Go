@@ -1,5 +1,5 @@
 #define AppName "JTTY-Go"
-#define AppVersion "5.36.14"
+#define AppVersion "5.36.16"
 #define AppPublisher "BH2VSQ"
 #define AppExeName "JTTY-Go.exe"
 
@@ -30,10 +30,10 @@ RestartApplications=no
 ChangesAssociations=no
 
 [Files]
-; JTTY-Go.exe contains the frontend. NET rigctl connects to an external rigctld service.
+; Local Hamlib runtime is pinned and verified by the packaging script.
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
-Source: "..\licenses\WSJT-X-GPL-3.0.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
-Source: "..\licenses\JTTY-PORT-NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\build\bin\hamlib\*"; DestDir: "{app}\hamlib"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

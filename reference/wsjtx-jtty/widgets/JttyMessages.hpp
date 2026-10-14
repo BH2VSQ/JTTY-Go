@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <type_traits>
 
 #include <QByteArray>
@@ -17,6 +18,35 @@
 
 namespace Jtty
 {
+  // A content-free "keep transmitting" pattern (ordinary TEXT5-encoded text, nothing protocol-special) used to bridge a typing pause without PTT dropping/re-keying; '<' isn't used in normal chat text, so it's recognized and suppressed wherever JTTY text is displayed or logged.
+  inline QString const jttyFillerText =
+    QStringLiteral ("<<<<< <<<<<");
+
+  inline bool isJttyFillerText (QString const& text)
+  {
+    QString const trimmed = text.trimmed ();
+    if (trimmed.isEmpty ()) return false;
+    for (QChar const c : trimmed) {
+      if (c != QLatin1Char ('<') && c != QLatin1Char (' ')) return false;
+    }
+    return true;
+  }
+
+  // Collapses embedded filler runs (any internal spacing) to a single space, without trimming the string's own leading/trailing edge. For a growing-message delta fragment (e.g. ReceiveResultController's N1MM echo), a leading/trailing space is the word boundary against already-echoed text, not something filler-adjacent to discard.
+  inline QString collapseJttyFillerRuns (QString text)
+  {
+    static QRegularExpression const pattern (
+      QStringLiteral ("\\s*(?:<{5}\\s*)+"));
+    text.replace (pattern, QStringLiteral (" "));
+    return text;
+  }
+
+  // Filler travels gaplessly inside the same growing message as the real content around it, so it shows up embedded mid-string rather than as an isolated update; strips one-or-more 5-char '<' blocks (any internal spacing) and collapses the surrounding whitespace to a single space.
+  inline QString stripJttyFillerText (QString text)
+  {
+    return collapseJttyFillerRuns (text).simplified ();
+  }
+
   struct ParsedDecodeLine
   {
     int frequency {0};
@@ -28,12 +58,6 @@ namespace Jtty
   {
     QString text;
     bool substituted {false};
-    bool truncated {false};
-
-    bool changed () const
-    {
-      return substituted || truncated;
-    }
   };
 
   enum class NativeAtomKind : qint8
@@ -141,6 +165,7 @@ namespace Jtty
     NativeExchangeProfile exchangeProfile {NativeExchangeProfile::None};
     QString configuredExchange;
     QString grid;
+    int snr {-10};  // SNR of received signal, for %R; stubbed until the decoder reports it
 
     NativeMacroContext () = default;
 
@@ -191,15 +216,15 @@ namespace Jtty
   inline PreparedTransmitText prepareTransmitText (QString const& message)
   {
     PreparedTransmitText result;
-    int const maxLength {maxTransmitLength};
-    result.truncated = message.size () > maxLength;
-    QString const bounded = message.left (maxLength);
-    result.text.reserve (bounded.size ());
+    result.text.reserve (message.size ());
 
-    for (QChar c : bounded) {
+    for (QChar c : message) {
       if (c == QChar::Null || c == QLatin1Char {'~'}) {
         result.text.append (QLatin1Char {' '});
         result.substituted = true;
+      } else if (c == QLatin1Char {'\n'} || c == QLatin1Char {'\r'}) {
+        // A forced segment boundary, not a character; execute_jtty_tx splits on it.
+        result.text.append (QLatin1Char {'\n'});
       } else if (isSourceCharacter (c)) {
         result.text.append (c);
       } else {
@@ -211,25 +236,54 @@ namespace Jtty
     return result;
   }
 
-  // A message being queued behind one still transmitting (FIFO chaining,
-  // see MainWindow::execute_jtty_tx) gets a leading space inserted, since
-  // the user is unlikely to remember (or want) to type one themselves,
-  // and unlikely to hit Return mid-word. Re-bounds to maxTransmitLength
-  // in case the message was already at prepareTransmitText's limit.
-  // No-op (returns message unchanged) when isChained is false.
-  inline QString withChainedSpacing (QString const& message, bool isChained)
+  struct TransmitTextSegment
   {
-    if (!isChained) return message;
-    return (QLatin1Char {' '} + message).left (maxTransmitLength);
+    int offset {0};
+    int length {0};
+    QString text;
+  };
+
+  // Source spans include separator spaces so every submitted character is accounted for.
+  inline TransmitTextSegment nextTransmitTextSegment (
+      QString const& message, int offset, int maximumLength = maxTransmitLength)
+  {
+    if (offset < 0 || offset >= message.size () || maximumLength <= 0) return {};
+
+    int length = std::min ({message.size () - offset, maximumLength, maxTransmitLength});
+    if (offset + length < message.size ()
+        && message.at (offset + length) != QLatin1Char {' '}) {
+      for (int i = length - 1; i > 0; --i) {
+        if (message.at (offset + i) == QLatin1Char {' '}
+            && !message.mid (offset, i).trimmed ().isEmpty ()) {
+          length = i + 1;
+          break;
+        }
+      }
+    }
+    return {offset, length, message.mid (offset, length)};
   }
 
-  // Builds the fixed-width frame passed to genjtty_. The chained leading space
-  // is transport-only spacing, so it belongs here rather than in the logical
-  // message that is logged, displayed, and checked for contest serials.
-  inline QString transmitFrame (QString const& message, bool isChained)
+  // A segment that does not encode refuses the line rather than being cut shorter: the rest would continue the receiver's 80-column message.
+  template <typename Encode>
+  std::optional<QVector<TransmitTextSegment>> encodeTransmitLine (QString const& line, Encode&& encode)
   {
-    QString const spaced = withChainedSpacing (message, isChained);
-    return spaced + QString (maxTransmitLength - spaced.size (), QLatin1Char {' '});
+    QVector<TransmitTextSegment> segments;
+    for (int offset = 0; offset < line.size ();) {
+      auto const source = nextTransmitTextSegment (line, offset);
+      if (!source.text.trimmed ().isEmpty ()) {
+        if (!encode (source.text)) return std::nullopt;
+        segments.append (source);
+      }
+      offset += source.length;
+    }
+    return segments;
+  }
+
+  // An empty result rejects oversized text before it reaches the fixed-width codec.
+  inline QString transmitFrame (QString const& message)
+  {
+    if (message.size () > maxTransmitLength) return {};
+    return message + QString (maxTransmitLength - message.size (), QLatin1Char {' '});
   }
 
   // Number of receive samples in one complete JTTY frame: 59 symbols of 384
@@ -294,6 +348,41 @@ namespace Jtty
     }
   }
 
+  // Chat/QSO-style templates for JTTY's "FT8 style" message preset (as opposed
+  // to the contest-exchange-oriented templates above). F7/F8 are left blank.
+  inline QString ft8StyleMacroTemplate (int functionKey)
+  {
+    static QString const templates[] {
+      QStringLiteral ("%H %M %G"),
+      QStringLiteral ("%H %M %R"),
+      QStringLiteral ("%H %M R%R"),
+      QStringLiteral ("%H %M RRR"),
+      QStringLiteral ("%H %M 73"),
+      QStringLiteral ("CQ %M %G"),
+      QString {},
+      QString {}
+    };
+    if (functionKey < 1 || functionKey > 8) return {};
+    return templates[functionKey - 1];
+  }
+
+  enum class MessageStyle : qint8 { Contest = 0, Ft8 = 1 };
+
+  // QSettings key for one function key's template under the given style, so
+  // Contest- and FT8-style edits persist independently of each other.
+  inline QString messageStyleSettingsKey (MessageStyle style, int functionKey)
+  {
+    return style == MessageStyle::Ft8
+      ? QStringLiteral ("JTTY_FT8_msg%1").arg (functionKey)
+      : QStringLiteral ("JTTY_msg%1").arg (functionKey);
+  }
+
+  inline QString messageStyleDefaultTemplate (MessageStyle style, int functionKey)
+  {
+    return style == MessageStyle::Ft8
+      ? ft8StyleMacroTemplate (functionKey) : nativeMacroTemplate (functionKey);
+  }
+
   inline QString normalizedMacroTemplate (QString const& macroTemplate)
   {
     return macroTemplate.simplified ().toUpper ();
@@ -330,6 +419,11 @@ namespace Jtty
     return configured;
   }
 
+  inline QString formatSnr (int snr)
+  {
+    return QString::asprintf ("%+03d", snr);
+  }
+
   inline QString expandLiteralMacro (QString macroTemplate,
                                      NativeMacroContext const& context)
   {
@@ -338,7 +432,8 @@ namespace Jtty
     macroTemplate.replace (QStringLiteral ("%Q"), context.hisCall);
     macroTemplate.replace (QStringLiteral ("%N"), formatSerialNumber (context.serialNumber));
     macroTemplate.replace (QStringLiteral ("%E"), nativeExchangeFieldText (context));
-    macroTemplate.replace (QStringLiteral ("%G"), context.grid);
+    macroTemplate.replace (QStringLiteral ("%G"), context.grid.trimmed ().toUpper ().left (4));
+    macroTemplate.replace (QStringLiteral ("%R"), formatSnr (context.snr));
     return macroTemplate;
   }
 
@@ -808,6 +903,14 @@ namespace Jtty
                                                     tsyncSeconds));
   }
 
+  // Matches a decode line's freq/SNR column layout with the SNR field left
+  // blank (a sent message has no measured SNR), so Tx and Rx lines line up.
+  inline QString formatJttyTxLine (float frequency, QString const& message)
+  {
+    QString const frequencyText = QStringLiteral ("%1").arg (qRound (frequency), 4);
+    return frequencyText + QStringLiteral ("      ") + message;
+  }
+
   inline ParsedDecodeLine parseDecodeLine (QString const& line)
   {
     ParsedDecodeLine result;
@@ -859,6 +962,21 @@ namespace Jtty
     return result;
   }
 
+  // Format one JTTY decode line for display/logging: "Freq SNR  Message" (a
+  // leading UTC time label, when wanted, is prepended by the caller). SNR is
+  // plain right-justified, no zero-pad/forced sign -- matches the existing
+  // decode-pane convention used by other modes (e.g. FT8's own line format,
+  // lib/decoder_callbacks.f90, "i4" for its SNR field), deliberately
+  // different from formatSnr's zero-padded convention for the %R Tx macro.
+  inline QString formatJttyDecodeLine (float frequency, int snr, QString const& message)
+  {
+    QString const frequencyText = QStringLiteral ("%1").arg (qRound (frequency), 4);
+    QString const snrText = QStringLiteral ("%1").arg (snr, 3);
+    return message.isEmpty ()
+      ? frequencyText
+      : frequencyText + QStringLiteral (" ") + snrText + QStringLiteral ("  ") + message;
+  }
+
   struct DecodeLineChange
   {
     bool messageChanged {false};
@@ -888,6 +1006,7 @@ namespace Jtty
     QString text;
     float sequenceStart {0.f};
     bool complete {false};
+    int snr {-10};
   };
 
   inline bool shouldApplyToQsoHistory (bool alreadyPresent, float frequency,

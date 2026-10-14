@@ -1,7 +1,7 @@
 import './style.css'
 
 interface Callsign { value:string; start:number; end:number; confidence:number }
-interface DecodeMessage { sequence:number; signalUtc:string; receivedUtc:string; snr:number; dt:number; frequencyHz:number; message:string; callsigns?:Callsign[]; confidence:number; jttyMessageId?:number }
+interface DecodeMessage { sequence:number; signalUtc:string; receivedUtc:string; snr:number; dt:number; frequencyHz:number; message:string; callsigns?:Callsign[]; confidence:number; jttyMessageId?:number; jttyTerminal?:string }
 interface WaterfallFrame { timestamp:string; startHz:number; binHz:number; power:number[] }
 interface AudioDevice { id:string; name:string; isInput:boolean; isOutput:boolean; sampleRates?:number[] }
 interface RadioMeterCapabilities { strength:boolean; alc:boolean; powerWatts:boolean; powerPercent:boolean; swr:boolean }
@@ -11,7 +11,9 @@ interface HamlibModel { modelId:number; label:string; manufacturer?:string; mode
 interface QSOListItem { key:string; utc:string; frequencyHz:number; message:string; callsigns?:Callsign[]; tx?:boolean; sequence:number }
 interface MacroConfig { id:string; name:string; shortcut:string; template:string; enabled:boolean; global:boolean }
 interface FrequencyBandSetting { band:string; frequencies:number[]; defaultHz:number }
+type RadioProfile = Omit<RadioSettings, "backend"|"enabled"|"configVersion"|"local"|"net">
 interface RadioSettings {
+ configVersion?:number; local?:RadioProfile; net?:RadioProfile;
   backend:string; enabled:boolean; rigName:string; rigModelId:number; rigctldPath:string; host:string; port:number; serialPort:string;
   baud:number; dataBits:number; stopBits:number; handshake:string; pttMethod:string; pttSerialPort:string;
   splitMode:string; txAudioSource:string; forceDTR:string; forceRTS:string; pollIntervalSec:number; mode:string; passbandHz:number; readPowerSWR:boolean; haltOnSWR:boolean
@@ -77,6 +79,7 @@ let closeAfterSettingsSave=false
 let audioDevices:{inputs:AudioDevice[];outputs:AudioDevice[]}={inputs:[],outputs:[]}
 let hamlibModels:HamlibModel[]=[]
 let hamlibCapabilities:HamlibCapabilities|null=null
+let netAudioCapabilities:HamlibCapabilities|null=null
 let hamlibCapabilitiesModelId=0
 let hamlibCapabilitiesPendingModelId=0
 let serialPorts:string[]=[]
@@ -173,7 +176,7 @@ function mergeSettings(v:any):Settings{
     macros:Array.isArray(v.macros)?v.macros:d.macros,decodeLogMode:typeof v.decodeLogMode==='string'?v.decodeLogMode:d.decodeLogMode,decodeLogEnabled:typeof v.decodeLogEnabled==='boolean'?v.decodeLogEnabled:d.decodeLogEnabled,recordEnabled:typeof v.recordEnabled==='boolean'?v.recordEnabled:d.recordEnabled,exchangeSerialNumber:Number(v.exchangeSerialNumber)>0?Math.floor(Number(v.exchangeSerialNumber)):d.exchangeSerialNumber,rxFrequencyHz:Number(v.rxFrequencyHz)>=200&&Number(v.rxFrequencyHz)<=5000?Math.round(Number(v.rxFrequencyHz)):d.rxFrequencyHz,txFrequencyHz:Number(v.txFrequencyHz)>=200&&Number(v.txFrequencyHz)<=5000?Math.round(Number(v.txFrequencyHz)):d.txFrequencyHz} as Settings
 }
 
-function setDX(call:string,notifyBackend=true){const normalized=String(call||'').trim().toUpperCase();const dx=document.querySelector<HTMLInputElement>('#dx');if(dx)dx.value=normalized;if(notifyBackend)emitBackendEvent('qso:dxcall',normalized);return normalized}
+function setDX(call:string,notifyBackend=true){const normalized=String(call||'').trim().toUpperCase();const dx=document.querySelector<HTMLInputElement>('#dx');if(dx)dx.value=normalized;if(notifyBackend)emitBackendEvent('qso:set-dxcall',normalized);return normalized}
 function setTXAudioLevel(level:number, notifyBackend=true){
   let n=Math.round(level)
   if(!Number.isFinite(n)) n=65
@@ -269,8 +272,10 @@ function renderMessage(m:DecodeMessage,root:Element,targetId='decodes'){
   div.innerHTML='<span class="utc"></span><span class="snr-value"></span><span class="df"></span><span class="message"></span>'
   const dt=new Date(m.signalUtc||m.receivedUtc||Date.now());div.querySelector('.utc')!.textContent=dt.toISOString().slice(11,19);div.querySelector('.snr-value')!.textContent=Number.isFinite(m.snr)?`${m.snr} dB`:'—';div.querySelector('.df')!.textContent=String(m.frequencyHz)
   const message=div.querySelector('.message')!;const calls=m.callsigns||[];let cursor=0
-  for(const c of calls){if(c.start>cursor)message.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:dxgrid',g)}});message.append(b);cursor=c.end}
+  for(const c of calls){if(c.start>cursor)message.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:set-dxgrid',g)}});message.append(b);cursor=c.end}
   if(cursor<m.message.length)message.append(document.createTextNode(m.message.slice(cursor)))
+  const states:Record<string,string>={growing:'接收中',complete:'完整',expired:'超时', 'reception-ended':'接收结束'}
+  if(m.jttyTerminal&&states[m.jttyTerminal]){const status=document.createElement('small');status.className='jtty-reception-state';status.textContent=states[m.jttyTerminal];status.title=m.jttyTerminal==='expired'?'未收到消息结束标记，保留已接收内容':status.textContent;message.append(status)}
   insertDecodeRowSorted(list,div,decodeSortTime(m),m.sequence)
   if(followTail&&isNew&&targetId==='decodes')scheduleDecodeTail(list)
 }
@@ -306,7 +311,7 @@ function addQSOTx(message:string,utc:string,frequencyHz:number){
   while(qsoRows.length>64)qsoRows.shift()
   renderQSOList()
 }
-function renderQSOMessage(m:QSOListItem,msg:HTMLElement){const calls=m.callsigns||[];let cursor=0;for(const c of calls){if(c.start>cursor)msg.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:dxgrid',g)}});msg.append(b);cursor=c.end}if(cursor<m.message.length)msg.append(document.createTextNode(m.message.slice(cursor)))}
+function renderQSOMessage(m:QSOListItem,msg:HTMLElement){const calls=m.callsigns||[];let cursor=0;for(const c of calls){if(c.start>cursor)msg.append(document.createTextNode(m.message.slice(cursor,c.start)));const b=document.createElement('button');b.className='call-token';b.textContent=c.value;b.title='设置 DX 呼号';b.addEventListener('click',e=>{e.stopPropagation();setDX(c.value);const g=extractGrid(m.message);if(g){dxGrid=g;const gi=document.querySelector<HTMLInputElement>('#dx-grid');if(gi)gi.value=g;emitBackendEvent('qso:set-dxgrid',g)}});msg.append(b);cursor=c.end}if(cursor<m.message.length)msg.append(document.createTextNode(m.message.slice(cursor)))}
 function renderQSOList(){const list=document.querySelector<HTMLDivElement>('#qso-decodes');if(!list)return;list.innerHTML='';const source=qsoRows.filter(r=>r.tx).sort((a,b)=>{const ta=Date.parse(a.utc),tb=Date.parse(b.utc);const va=Number.isFinite(ta)?ta:Number.POSITIVE_INFINITY;const vb=Number.isFinite(tb)?tb:Number.POSITIVE_INFINITY;if(va!==vb)return va-vb;return a.sequence-b.sequence}).slice(-24);for(const m of source){const div=document.createElement('div');div.className=`qso-decode-row${m.tx?' qso-tx-row':''}`;div.dataset.key=m.key;div.innerHTML='<span class="qso-utc"></span><span class="qso-df"></span><span class="qso-msg"></span>';const utc=div.querySelector('.qso-utc')!;const d=new Date(m.utc);utc.textContent=Number.isNaN(d.getTime())?'--:--:--':d.toISOString().slice(11,19);div.querySelector('.qso-df')!.textContent=String(m.frequencyHz);renderQSOMessage(m,div.querySelector('.qso-msg')!);div.addEventListener('click',()=>setTXFrequency(m.frequencyHz));list.append(div)}if(!source.length){const e=document.createElement('div');e.className='qso-empty';e.textContent='—';list.append(e)}}
 
 function updateWaterfallMarkers(){
@@ -510,7 +515,7 @@ function requestHamlibCapabilities(modelId:number){
   hamlibCapabilitiesModelId=modelId
   hamlibCapabilitiesPendingModelId=modelId
   const overlay=document.querySelector<HTMLElement>('#settings-overlay');if(overlay)updateRadioControlStates(overlay)
-  emitBackendEvent('hamlib:capabilities',modelId)
+  emitBackendEvent('hamlib:capabilities:request',modelId)
 }
 function populateHamlibModels(loadCapabilities=false){
   const sel=document.querySelector<HTMLSelectElement>('#set-rig-model');if(!sel)return
@@ -523,7 +528,7 @@ function populateHamlibModels(loadCapabilities=false){
   sel.innerHTML=`<option value="0"${noneSelected}>None</option>`+fallback+models.map(m=>`<option value="${m.modelId}" data-name="${esc(m.label)}">${esc(m.label)}</option>`).join('')
   sel.value=known||current!=='0'?current:'0'
   settingsDraft.radio.rigModelId=num(sel.value,0)
-  settingsDraft.radio.backend=settingsDraft.radio.rigModelId>0?'hamlib-rigctld':'none'
+  // Model selection never changes the selected backend.
   const opt=sel.selectedOptions[0]
   if(opt?.dataset.name)settingsDraft.radio.rigName=opt.dataset.name
   else if(settingsDraft.radio.rigModelId===0)settingsDraft.radio.rigName='None'
@@ -532,13 +537,23 @@ function populateHamlibModels(loadCapabilities=false){
 
 function populateSerialPorts(){
   const root=document.querySelector('#settings-overlay');if(!root)return
-  const sel=root.querySelector<HTMLSelectElement>('#set-ptt-port');if(!sel)return
-  const current=String(settingsDraft.radio.pttSerialPort||'').trim().toUpperCase()
-  const available=serialPorts.map(x=>String(x).trim().toUpperCase()).filter(Boolean)
-  const values=[...new Set(available.concat(current?[current]:[]))]
-  sel.innerHTML='<option value="">自动选择</option>'+values.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('')
-  sel.value=current&&values.includes(current)?current:(values[0]||'')
-  settingsDraft.radio.pttSerialPort=sel.value
+  const available=[...new Set(serialPorts.map(x=>String(x).trim().toUpperCase()).filter(Boolean))]
+  const ptt=root.querySelector<HTMLSelectElement>('#set-ptt-port')
+  if(ptt){
+    const current=ptt.value||String(settingsDraft.radio.pttSerialPort||'').trim().toUpperCase()
+    const values=[...new Set(available.concat(current?[current]:[]))]
+    ptt.innerHTML='<option value="">请选择串口</option>'+values.map(x=>`<option value="${esc(x)}">${esc(x)}${available.includes(x)?'':'（当前不可用）'}</option>`).join('')
+    ptt.value=current
+  }
+  const cat=root.querySelector<HTMLSelectElement>('#set-cat-port')
+  const device=root.querySelector<HTMLInputElement>('#set-serial')
+  if(cat&&device){
+    const current=device.value.trim()
+    const manual=cat.value==='__manual__'||(!!current&&!/^COM\d+$/i.test(current))
+    const values=[...new Set(available.concat(current&&!manual?[current.toUpperCase()]:[]))]
+    cat.innerHTML='<option value="">请选择 CAT 串口</option>'+values.map(x=>`<option value="${esc(x)}">${esc(x)}${available.includes(x)?'':'（当前不可用）'}</option>`).join('')+'<option value="__manual__">手动输入设备路径…</option>'
+    cat.value=manual?'__manual__':current.toUpperCase()
+  }
   updateRadioControlStates(root)
 }
 
@@ -587,11 +602,11 @@ function setSettingsStatus(t:string){const e=document.querySelector('#settings-s
 
   const selectedPTT=document.querySelector<HTMLInputElement>('input[name="pttm"]:checked')
   if(selectedPTT)s.radio.pttMethod=selectedPTT.value==='CAT'?'Rigctl':selectedPTT.value
-  const selectedPTTMethod=String(selectedPTT?.value||s.radio.pttMethod||'VOX').trim().toUpperCase()
-  const rigctlEnabled=selectedPTTMethod==='RIGCTL'||selectedPTTMethod==='CAT'
-  s.radio.rigModelId=0
-  s.radio.rigName=rigctlEnabled?'NET rigctl':'None'
-  s.radio.backend=rigctlEnabled?'rigctld-net':'none'
+  const backend=g('#set-backend')?.value||s.radio.backend
+  s.radio.backend=backend
+  s.radio.enabled=backend!=='none'
+  if(q('#set-rig-model')) {s.radio.rigModelId=num(q('#set-rig-model')!.value,0);s.radio.rigName=q('#set-rig-model')!.selectedOptions[0]?.dataset.name||''}
+  if(g('#set-rigctld-path'))s.radio.rigctldPath=g('#set-rigctld-path')!.value.trim()
   if(g('#set-host'))s.radio.host=g('#set-host')!.value.trim()
   if(g('#set-port'))s.radio.port=num(g('#set-port')!.value,s.radio.port)
   if(g('#set-serial'))s.radio.serialPort=g('#set-serial')!.value.trim()
@@ -604,7 +619,8 @@ function setSettingsStatus(t:string){const e=document.querySelector('#settings-s
   if(g('#set-force-dtr'))s.radio.forceDTR=g('#set-force-dtr')!.value
   if(g('#set-force-rts'))s.radio.forceRTS=g('#set-force-rts')!.value
   if(q('#set-split'))s.radio.splitMode=q('#set-split')!.value
-  if(q('#set-txaudio'))s.radio.txAudioSource=q('#set-txaudio')!.value
+  const audio=document.querySelector<HTMLInputElement>('input[name="txaudio"]:checked')
+  if(audio)s.radio.txAudioSource=audio.value
   if(g('#set-poll'))s.radio.pollIntervalSec=Math.max(1,Math.round(num(g('#set-poll')!.value,s.radio.pollIntervalSec)))
   if(g('#set-power-swr'))s.radio.readPowerSWR=g('#set-power-swr')!.checked
   if(g('#set-halt-swr'))s.radio.haltOnSWR=g('#set-halt-swr')!.checked
@@ -621,7 +637,7 @@ function setSettingsStatus(t:string){const e=document.querySelector('#settings-s
     return {band,frequencies:list,defaultHz:def}
   })
   if(g('#set-radio-enabled')){s.radio.enabled=g('#set-radio-enabled')!.checked;s.radio.backend=s.radio.enabled?'rigctld-net':'none'}
-  settingsDraft=s;return s
+  saveRadioProfile(s.radio);settingsDraft=s;return s
 }
 
 function normalizeSettingsTab(tab:string){if(tab==='radio'&&!RADIO_SETTINGS_UI_ENABLED)return 'general';return ['general','radio','audio','frequency'].includes(tab)?tab:'general'}
@@ -714,41 +730,94 @@ function arrangeRadioSettingsColumns(overlay:HTMLElement){
 }
 
 function updateRadioControlStates(root:Element){
-  const hostInput=root.querySelector<HTMLInputElement>('#set-host')
-  const portInput=root.querySelector<HTMLInputElement>('#set-port')
-  const host=hostInput?.value.trim()||''
-  const port=num(portInput?.value||'',4532)
-  const ptt=(root.querySelector<HTMLInputElement>('input[name="pttm"]:checked')?.value||settingsDraft.radio.pttMethod||'VOX').trim().toUpperCase()
-  const enabled=ptt==='RIGCTL'||ptt==='CAT'
-  const useSerial=ptt==='DTR'||ptt==='RTS'
+  const r=settingsDraft.radio, local=r.backend==='hamlib-local', enabled=r.backend!=='none'
+  const caps=local?selectedHamlibCapabilities():netAudioCapabilities
+  const method=root.querySelector<HTMLInputElement>('input[name="pttm"]:checked')?.value||r.pttMethod
+  const serial=method==='RTS'||method==='DTR'
   const pttPort=root.querySelector<HTMLSelectElement>('#set-ptt-port')
-  if(pttPort){pttPort.disabled=!useSerial;pttPort.title=useSerial?'本机串口 PTT':'仅 DTR/RTS 模式需要本机串口'}
-  if(hostInput)hostInput.disabled=!enabled
-  if(portInput)portInput.disabled=!enabled
-  const poll=root.querySelector<HTMLInputElement>('#set-poll')
-  if(poll)poll.disabled=!enabled
-  const mode=root.querySelector<HTMLSelectElement>('#set-mode-radio')
-  if(mode)mode.disabled=!enabled
-  const passband=root.querySelector<HTMLInputElement>('#set-passband')
-  if(passband)passband.disabled=!enabled
-  const split=root.querySelector<HTMLSelectElement>('#set-split')
-  if(split)split.disabled=!enabled
-  const testConnection=root.querySelector<HTMLButtonElement>('#radio-test-cat')
-  if(testConnection)testConnection.disabled=!enabled||!host||port<1||port>65535
-  const testPTT=root.querySelector<HTMLButtonElement>('#radio-test-ptt')
-  if(testPTT){
-    const rigctlNeedsConnection=ptt==='RIGCTL'||ptt==='CAT'
-    const localSerialAvailable=!!pttPort?.value||serialPorts.length>0
-    testPTT.disabled=ptt==='VOX'||(rigctlNeedsConnection&&testPTT.dataset.online!=='true')||(useSerial&&!localSerialAvailable)
-    testPTT.setAttribute('aria-disabled',String(testPTT.disabled))
+  if(pttPort)pttPort.disabled=!serial
+  const note=root.querySelector<HTMLElement>('#hamlib-capability-note')
+  if(note)note.textContent=caps?`设备类型：${caps.portType}；CAT PTT 指令：${caps.hasSetPTT?'支持':'不支持'}；支持模式：${(caps.supportedModes||[]).join(', ')}`:(r.rigModelId?'正在读取型号能力…':'请选择电台型号')
+  root.querySelectorAll<HTMLElement>('[data-serial-setting]').forEach(e=>{e.hidden=!!caps&&caps.portType!=='serial'})
+  const device=root.querySelector<HTMLInputElement>('#set-serial')
+  const cat=root.querySelector<HTMLSelectElement>('#set-cat-port')
+  const useCATSerial=local&&(!caps||caps.portType==='serial')
+  if(cat){cat.hidden=!useCATSerial;cat.disabled=!useCATSerial}
+  const refreshCAT=root.querySelector<HTMLButtonElement>('#radio-refresh-cat')
+  if(refreshCAT)refreshCAT.hidden=!useCATSerial
+  const title=root.querySelector<HTMLElement>('#cat-device-title')
+  if(title)title.textContent=useCATSerial?'CAT 串口':caps?.portType==='network'?'电台网络地址':'设备路径'
+  if(device){
+    device.disabled=!!caps&&caps.portType==='none'
+    device.hidden=useCATSerial&&cat?.value!=='__manual__'
+    device.placeholder=caps?.portType==='network'?'例如 192.168.1.10:50001':caps?.portType==='none'?'该型号无需设备路径':'手动输入 COM 端口或设备路径'
   }
+  const pttRow=root.querySelector<HTMLElement>('.radio-net-ptt-port-row-v5')
+  if(pttRow)pttRow.hidden=!serial
+  const pttNote=root.querySelector<HTMLElement>('#ptt-method-note')
+  if(pttNote)pttNote.textContent=method==='Rigctl'?(local?'CAT / Rigctl 使用左侧 CAT 串口，无需单独选择 PTT 串口。':'CAT / Rigctl 由 NET 服务器控制 PTT，无需本机 PTT 串口。'):serial?(local?'RTS/DTR 由本地 Hamlib 控制；留空 PTT 串口时使用左侧 CAT 设备。':'RTS/DTR 使用本机独立串口，必须明确选择。'):'VOX 由发射音频触发，无需单独的 PTT 串口。'
+
+  const split=root.querySelector<HTMLSelectElement>('#set-split')
+  const mode=root.querySelector<HTMLSelectElement>('#set-mode-radio')
+  if(mode&&caps?.supportedModes?.length){const current=mode.value||r.mode;const modes=caps.supportedModes;mode.innerHTML=(modes.includes(current)?'':`<option value="${esc(current)}" selected disabled>${esc(current)}（型号未报告支持）</option>`)+modes.map(v=>`<option value="${esc(v)}" ${v===current?'selected':''}>${esc(v)}</option>`).join('')}
+  if(split)split.disabled=!enabled||(!!caps&&(!caps.hasGetSplitVFO||!caps.hasSetSplitVFO))
+  root.querySelectorAll<HTMLInputElement>('input[name="txaudio"]').forEach(audio=>audio.disabled=!enabled||method!=='Rigctl'||!caps?.hasCATPTTMicData)
+  const audioNote=root.querySelector<HTMLElement>('#txaudio-note')
+  if(audioNote)audioNote.textContent=caps?.hasCATPTTMicData?'仅在 CAT / Rigctl 下选择电台发射音频接口。':'仅支持 Mic/Data CAT PTT 的电台可选择；其他电台使用普通 PTT。NET 模式请先测试连接。'
+  const model=Number(root.querySelector<HTMLSelectElement>('#set-rig-model')?.value||r.rigModelId)
+  const host=root.querySelector<HTMLInputElement>('#set-host')?.value.trim()
+  const port=Number(root.querySelector<HTMLInputElement>('#set-port')?.value||r.port)
+  const test=root.querySelector<HTMLButtonElement>('#radio-test-cat')
+  if(test)test.disabled=!enabled||(local?model<=0:(!host||port<1||port>65535))
+  const ptt=root.querySelector<HTMLButtonElement>('#radio-test-ptt')
+  if(ptt){ptt.disabled=method==='VOX'||((local||method==='Rigctl')&&ptt.dataset.online!=='true')||(!local&&serial&&!pttPort?.value);ptt.setAttribute('aria-disabled',String(ptt.disabled))}
+}
+
+function radioProfile(r:RadioSettings):RadioProfile {
+  const {backend,enabled,configVersion,local,net,...profile}=r
+  return structuredClone(profile)
+}
+function saveRadioProfile(r:RadioSettings){
+  if(r.backend==='hamlib-local')r.local=radioProfile(r)
+  if(r.backend==='rigctld-net')r.net=radioProfile(r)
+  r.configVersion=2
+}
+function switchRadioBackend(next:string){
+  const previous=settingsDraft.radio.backend
+  const select=document.querySelector<HTMLSelectElement>('#set-backend')!
+  select.value=previous
+  const r=collectDraft().radio
+  emitBackendEvent('radio:test-end',{restore:false})
+  stopPTTTestCountdown()
+  const fallback=radioProfile(defaultSettings().radio);fallback.splitMode='None'
+  const profile=next==='hamlib-local'?(r.local||fallback):next==='rigctld-net'?(r.net||fallback):radioProfile(r)
+  settingsDraft.radio={...r,...structuredClone(profile),backend:next,enabled:next!=='none'}
+  hamlibCapabilities=null;hamlibCapabilitiesModelId=0;hamlibCapabilitiesPendingModelId=0;netAudioCapabilities=null
+  renderSettingsModal('radio')
 }
 
 function updateRadioPTTControls(root:Element){updateRadioControlStates(root)}
 function bindSettingsActions(overlay:HTMLElement,tab:string){
-  overlay.querySelector('#radio-refresh-serial')?.addEventListener('click',()=>{
+  overlay.querySelectorAll('#radio-refresh-serial,#radio-refresh-cat').forEach(button=>button.addEventListener('click',()=>{
     setSettingsStatus('正在刷新本机串口列表…')
-    emitBackendEvent('radio:serial-ports','')
+    emitBackendEvent('radio:serial-ports:request','')
+  }))
+  overlay.querySelector('#set-cat-port')?.addEventListener('change',()=>{
+    const select=overlay.querySelector<HTMLSelectElement>('#set-cat-port')!
+    const input=overlay.querySelector<HTMLInputElement>('#set-serial')!
+    if(select.value!=='__manual__'){input.value=select.value;settingsDraft.radio.serialPort=select.value}
+    emitBackendEvent('radio:test-end',{restore:false,cancelProbes:false})
+    const ptt=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt')
+    if(ptt){ptt.dataset.online='false';ptt.setAttribute('aria-pressed','false');stopPTTTestCountdown()}
+    updateRadioControlStates(overlay)
+    if(select.value==='__manual__')input.focus()
+  })
+  overlay.querySelector('#set-serial')?.addEventListener('change',()=>{
+    settingsDraft.radio.serialPort=overlay.querySelector<HTMLInputElement>('#set-serial')!.value.trim()
+    emitBackendEvent('radio:test-end',{restore:false,cancelProbes:false})
+    const ptt=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt')
+    if(ptt){ptt.dataset.online='false';ptt.setAttribute('aria-pressed','false');stopPTTTestCountdown()}
+    updateRadioControlStates(overlay)
   })
   overlay.querySelector('#audio-refresh')?.addEventListener('click',()=>emitBackendEvent('audio:refresh',''))
   overlay.querySelector('#radio-test-cat')?.addEventListener('click',()=>{
@@ -814,11 +883,14 @@ function bindSettingsActions(overlay:HTMLElement,tab:string){
   })
   overlay.querySelector('#hamlib-update')?.addEventListener('click',()=>{const arch=overlay.querySelector<HTMLInputElement>('input[name="hamlib-arch"]:checked')?.value||'64';emitBackendEvent('hamlib:update',arch)})
   overlay.querySelector('#hamlib-revert')?.addEventListener('click',()=>{const arch=overlay.querySelector<HTMLInputElement>('input[name="hamlib-arch"]:checked')?.value||'64';emitBackendEvent('hamlib:revert',arch)})
-  overlay.querySelectorAll<HTMLInputElement>('input[name="pttm"]').forEach(e=>e.addEventListener('change',()=>{settingsDraft.radio.pttMethod=e.value==='CAT'?'Rigctl':e.value;const enabled=e.value.toUpperCase()==='RIGCTL'||e.value.toUpperCase()==='CAT';settingsDraft.radio.backend=enabled?'rigctld-net':'none';settingsDraft.radio.rigName=enabled?'NET rigctl':'None';const btn=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt');if(btn){btn.dataset.online='false';btn.setAttribute('aria-pressed','false');btn.classList.remove('ptt-active');stopPTTTestCountdown()}updateRadioControlStates(overlay)}))
-  overlay.querySelector('#set-host')?.addEventListener('input',()=>updateRadioControlStates(overlay))
-  overlay.querySelector('#set-port')?.addEventListener('input',()=>updateRadioControlStates(overlay))
+  overlay.querySelector('#set-backend')?.addEventListener('change',e=>switchRadioBackend((e.target as HTMLSelectElement).value))
+  overlay.querySelector('#radio-disconnect')?.addEventListener('click',()=>{emitBackendEvent('radio:test-end',{restore:false});(window as any).go?.app?.App?.DisconnectRadio?.().then(()=>setSettingsStatus('已断开电台')).catch((e:any)=>setSettingsStatus(String(e)))})
+  overlay.querySelector('#set-rig-model')?.addEventListener('change',()=>{collectDraft();requestHamlibCapabilities(settingsDraft.radio.rigModelId)})
+  overlay.querySelector('#rig-model-search')?.addEventListener('input',e=>{const query=(e.target as HTMLInputElement).value.toLowerCase();overlay.querySelectorAll<HTMLOptionElement>('#set-rig-model option').forEach(o=>o.hidden=o.value!=='0'&&!o.text.toLowerCase().includes(query))})
+  overlay.querySelectorAll<HTMLInputElement>('input[name="pttm"]').forEach(e=>e.addEventListener('change',()=>{settingsDraft.radio.pttMethod=normalizePTTMethod(e.value);emitBackendEvent('radio:test-end',{restore:false,cancelProbes:false});const btn=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt');if(btn){btn.dataset.online='false';btn.setAttribute('aria-pressed','false');btn.classList.remove('ptt-active');stopPTTTestCountdown()}updateRadioControlStates(overlay)}))
+  overlay.querySelectorAll('#set-host,#set-port').forEach(input=>input.addEventListener('input',()=>{netAudioCapabilities=null;emitBackendEvent('radio:test-end',{restore:false,cancelProbes:false});const btn=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt');if(btn){btn.dataset.online='false';btn.setAttribute('aria-pressed','false');btn.classList.remove('ptt-active');stopPTTTestCountdown()}updateRadioControlStates(overlay)}))
+  overlay.querySelectorAll<HTMLInputElement>('input[name="txaudio"]').forEach(input=>input.addEventListener('change',()=>{settingsDraft.radio.txAudioSource=input.value;emitBackendEvent('radio:test-end',{restore:false,cancelProbes:false});const btn=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt');if(btn){btn.dataset.online='false';btn.setAttribute('aria-pressed','false');btn.classList.remove('ptt-active');stopPTTTestCountdown()}updateRadioControlStates(overlay)}))
   overlay.querySelector('#set-ptt-port')?.addEventListener('change',()=>{settingsDraft.radio.pttSerialPort=(overlay.querySelector<HTMLSelectElement>('#set-ptt-port')?.value||'').trim();updateRadioControlStates(overlay)})
-  overlay.querySelectorAll<HTMLInputElement>('input[name="pttm"]').forEach(e=>e.addEventListener('change',()=>{settingsDraft.radio.pttMethod=e.value;const btn=overlay.querySelector<HTMLButtonElement>('#radio-test-ptt');if(btn){btn.dataset.online='false';btn.setAttribute('aria-pressed','false');btn.classList.remove('ptt-active')}updateRadioControlStates(overlay)}))
   overlay.querySelector('#set-split')?.addEventListener('change',()=>{settingsDraft.radio.splitMode=(overlay.querySelector<HTMLSelectElement>('#set-split')?.value||'Rig');updateRadioControlStates(overlay)})
   if(tab==='radio'){populateSerialPorts();updateRadioPTTControls(overlay);updateRadioControlStates(overlay)}
 }
@@ -829,14 +901,15 @@ function renderSettingsModal(tab=settingsTab){
     <div class="settings-tabs">${[['general','常规'],['radio','电台'],['audio','音频'],['frequency','频率']].map(([id,label])=>{const disabled=id==='radio'&&!RADIO_SETTINGS_UI_ENABLED;return `<button data-tab="${id}" class="${tab===id?'active':''}" ${disabled?'disabled aria-disabled="true" title="Hamlib 电台配置暂未启用"':''}>${label}</button>`}).join('')}</div>
     <div class="settings-body">${settingsPanel(tab)}</div>
     <div class="settings-footer"><span id="settings-status">就绪</span><div><button id="settings-cancel">取消</button><button id="settings-apply">应用</button><button id="settings-ok" class="ok">确定</button></div></div></div>`
-  arrangeRadioSettingsColumns(overlay)
+  arrangeRadioSettingsColumns(overlay as HTMLElement)
   overlay.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{if(b.disabled)return;collectDraft();const nextTab=normalizeSettingsTab(b.dataset.tab||'general');settingsTab=nextTab;renderSettingsModal(settingsTab);if(settingsTab==='audio')emitBackendEvent('audio:refresh','');}))
   overlay.querySelector('#settings-cancel')!.addEventListener('click',closeSettings)
   overlay.querySelector('#settings-apply')!.addEventListener('click',()=>saveSettings(false))
   overlay.querySelector('#settings-ok')!.addEventListener('click',()=>saveSettings(true))
   populateSettingsAudioDevices();populateHamlibModels(false);populateSerialPorts();bindSettingsActions(overlay as HTMLElement,tab)
   if(tab==='audio')emitBackendEvent('audio:refresh','')
-  
+  if(tab==='radio'&&settingsDraft.radio.backend==='hamlib-local'){emitBackendEvent('hamlib:models:request',false);requestHamlibCapabilities(settingsDraft.radio.rigModelId)}
+  if(tab==='radio')emitBackendEvent('radio:serial-ports:request','')
 }
 function settingsPanel(tab:string){
   const s=settingsDraft
@@ -852,33 +925,40 @@ function settingsPanelRadio(s:Settings){
   const ptt=methodRaw==='CAT'||methodRaw==='RIGCTL'?'Rigctl':(['DTR','RTS'].includes(methodRaw)?methodRaw:'VOX')
   const split=r.splitMode==='Fake It'?'Fake It':r.splitMode==='None'?'None':'Rig'
   const backend=String(r.backend||'').toLowerCase()
-  const enabled=!!r.enabled
+  const enabled=r.backend!=='none'
+  const local=r.backend==='hamlib-local'
   return `<div class="radio-net-settings-v4 radio-net-balanced-layout-v7">
     <div class="radio-net-columns-balanced-v7">
       <div class="radio-net-column-balanced-v7 radio-net-control-panel-balanced-v7">
-        <div class="radio-net-panel-heading-v7"><strong>电台控制</strong><small>网络频率、模式与连接设置</small></div>
+        <div class="radio-net-panel-heading-v7"><strong>电台控制</strong><small>本地 Hamlib / NET rigctl</small></div>
         <div class="radio-net-card-v4 radio-net-subcard-balanced-v7">
-          <div class="radio-net-card-title-v4"><div><strong>网络连接</strong><small>连接已经运行的 rigctld 服务，客户端不会启动本地 Hamlib。</small></div>
-            <label class="radio-net-enable-v4"><input id="set-radio-enabled" type="checkbox" ${enabled?'checked':''}>启用电台控制</label>
+          <label>电台后端<select id="set-backend">${[['none','关闭电台控制'],['hamlib-local','本地 Hamlib'],['rigctld-net','NET rigctl']].map(([v,t])=>`<option value="${v}" ${r.backend===v?'selected':''}>${t}</option>`).join('')}</select></label>
+          ${local?`<label>搜索型号<input id="rig-model-search" placeholder="厂商 / 型号"></label><label>电台型号<select id="set-rig-model"><option value="${r.rigModelId}">${esc(r.rigName||'请选择型号')}</option></select></label>
+          <label><span id="cat-device-title">CAT 串口 / 设备路径</span><div class="radio-cat-device-row"><select id="set-cat-port" aria-label="CAT 串口"><option value="">请选择 CAT 串口</option></select><input id="set-serial" aria-label="手动设备路径" value="${esc(r.serialPort)}" spellcheck="false" autocomplete="off"><button id="radio-refresh-cat" type="button">刷新串口</button></div></label>
+          <div data-serial-setting class="radio-net-radio-fields-v4">
+            <label>波特率<select id="set-baud">${[1200,2400,4800,9600,19200,38400,57600,115200].map(v=>`<option value="${v}" ${r.baud===v?'selected':''}>${v}</option>`).join('')}</select></label>
+            <fieldset><legend>数据位</legend>${[7,8].map(v=>`<label><input type="radio" name="db" value="${v}" ${r.dataBits===v?'checked':''}>${v}</label>`).join('')}</fieldset>
+            <fieldset><legend>停止位</legend>${[1,2].map(v=>`<label><input type="radio" name="sb" value="${v}" ${r.stopBits===v?'checked':''}>${v}</label>`).join('')}</fieldset>
+            <fieldset><legend>握手</legend>${['None','XONXOFF','Hardware'].map(v=>`<label><input type="radio" name="hs" value="${v}" ${r.handshake===v?'checked':''}>${v}</label>`).join('')}</fieldset>
+            <label>强制 DTR<select id="set-force-dtr">${['none','on','off'].map(v=>`<option ${r.forceDTR===v?'selected':''}>${v}</option>`).join('')}</select></label>
+            <label>强制 RTS<select id="set-force-rts">${['none','on','off'].map(v=>`<option ${r.forceRTS===v?'selected':''}>${v}</option>`).join('')}</select></label>
           </div>
-          <div class="radio-net-endpoint-v4">
-            <label><span>服务器地址</span><input id="set-host" value="${esc(r.host||'127.0.0.1')}" spellcheck="false" autocomplete="off" placeholder="192.168.1.20"></label>
-            <label><span>TCP 端口</span><input id="set-port" type="number" min="1" max="65535" value="${Number(r.port)>0?r.port:4532}"></label>
-          </div>
-          <p class="radio-net-help-v4">默认端口为 4532。远端主机需要运行 rigctld，并允许本机访问对应 TCP 端口。</p>
+          <details><summary>自定义 Hamlib 运行包</summary><label>rigctld.exe 完整路径<input id="set-rigctld-path" value="${esc(r.rigctldPath)}" placeholder="留空使用随包版本"></label></details>
+          <p id="hamlib-capability-note" class="radio-net-help-v4" role="status"></p><p class="radio-net-help-v4">本地服务自动管理，版本随完整应用包升级。</p>`:r.backend==='rigctld-net'?`
+          <div class="radio-net-endpoint-v4"><label>服务器地址<input id="set-host" value="${esc(r.host||'127.0.0.1')}" spellcheck="false" autocomplete="off"></label><label>TCP 端口<input id="set-port" type="number" min="1" max="65535" value="${r.port||4532}"></label></div><p class="radio-net-help-v4">连接已有服务器，不启动或停止服务器进程。</p>`:'<p class="radio-net-help-v4">电台控制已关闭，可独立配置 VOX 或串口 PTT。</p>'}
         </div>
 
         <div class="radio-net-card-v4 radio-net-subcard-balanced-v7">
           <div class="radio-net-card-title-v4"><div><strong>电台参数</strong><small>连接成功后应用到电台</small></div></div>
           <div class="radio-net-radio-fields-v4">
             <label><span>模式</span><select id="set-mode-radio"><option value="USB" ${r.mode==='USB'?'selected':''}>USB</option><option value="PKTUSB" ${r.mode==='PKTUSB'?'selected':''}>PKTUSB</option><option value="LSB" ${r.mode==='LSB'?'selected':''}>LSB</option><option value="DIG_U" ${r.mode==='DIG_U'?'selected':''}>DIG_U</option><option value="DIG_L" ${r.mode==='DIG_L'?'selected':''}>DIG_L</option><option value="CW" ${r.mode==='CW'?'selected':''}>CW</option><option value="FM" ${r.mode==='FM'?'selected':''}>FM</option><option value="AM" ${r.mode==='AM'?'selected':''}>AM</option></select></label>
-            <label><span>滤波带宽</span><div class="radio-net-input-unit-v4"><input id="set-passband" type="number" min="0" max="100000" value="${Number(r.passbandHz)>0?r.passbandHz:3000}"><em>Hz</em></div></label>
-            <label><span>异频操作</span><select id="set-split"><option value="None" ${split==='None'?'selected':''}>关闭</option><option value="Rig" ${split==='Rig'?'selected':''}>由电台控制</option><option value="Fake It" ${split==='Fake It'?'selected':''}>Fake It</option></select></label>
+            <label><span>滤波带宽</span><div class="radio-net-input-unit-v4"><input id="set-passband" type="number" min="0" max="100000" value="${Number(r.passbandHz)>=0?r.passbandHz:3000}"><em>Hz</em></div></label>
+            <label><span>异频操作</span><select id="set-split"><option value="None" ${split==='None'?'selected':''}>关闭</option><option value="Rig" ${split==='Rig'?'selected':''}>由电台控制</option><option value="Fake It" disabled>Fake It（尚未实现）</option></select></label>
             <label><span>状态轮询</span><div class="radio-net-input-unit-v4"><input id="set-poll" type="number" min="1" max="30" value="${Math.max(1,Number(r.pollIntervalSec)||1)}"><em>秒</em></div></label>
           </div>
-          <p class="radio-net-help-v4">模式、异频与带宽的支持情况由远端 rigctld 和电台决定。</p>
+          <p class="radio-net-help-v4">模式、异频与带宽由电台实际能力决定。</p>
         </div>
-        <div class="radio-net-actions-balanced-v7"><span>频率控制使用独立的 NET rigctl 连接。</span><button id="radio-test-cat">测试连接</button></div>
+        <div class="radio-net-actions-balanced-v7"><span role="status">${local?'由应用管理本地 Hamlib':'独立电台控制连接'}</span><button id="radio-test-cat">测试连接</button><button id="radio-disconnect">断开</button></div>
       </div>
 
       <div class="radio-net-column-balanced-v7 radio-net-ptt-column-balanced-v7">
@@ -887,15 +967,16 @@ function settingsPanelRadio(s:Settings){
           <div class="radio-net-card-title-v4"><div><strong>PTT 发射方式</strong><small>选择控制发射的来源，不影响 rigctl 频率读写。</small></div></div>
           <div class="radio-net-ptt-v4 radio-net-ptt-balanced-v7">
             <label><input type="radio" name="pttm" value="VOX" ${ptt==='VOX'?'checked':''}><span><b>VOX</b><small>由发射音频触发</small></span></label>
-            <label><input type="radio" name="pttm" value="Rigctl" ${ptt==='Rigctl'?'checked':''}><span><b>Rigctl</b><small>通过网络 rigctld 发送 PTT 命令</small></span></label>
+            <label><input type="radio" name="pttm" value="Rigctl" ${ptt==='Rigctl'?'checked':''}><span><b>CAT / Rigctl</b><small>由当前后端发送 PTT 命令</small></span></label>
             <label><input type="radio" name="pttm" value="RTS" ${ptt==='RTS'?'checked':''}><span><b>RTS</b><small>使用本机串口 RTS 线路</small></span></label>
             <label><input type="radio" name="pttm" value="DTR" ${ptt==='DTR'?'checked':''}><span><b>DTR</b><small>使用本机串口 DTR 线路</small></span></label>
           </div>
           <div class="radio-net-ptt-port-row-v5"><label class="radio-net-field-v4"><span>PTT 串口</span><select id="set-ptt-port" autocomplete="off"></select></label><button id="radio-refresh-serial" type="button">刷新串口</button></div>
-          <p class="radio-net-help-v4">RTS/DTR 使用本机独立串口；Rigctl 通过 TCP 控制 PTT；VOX 不需要单独的 PTT 连接。</p>
+          <p id="ptt-method-note" class="radio-net-help-v4">${local?'RTS/DTR 交给本地 Hamlib；留空 PTT 串口时使用 CAT 设备。':'RTS/DTR 使用本机独立串口，必须明确选择。'} VOX 由音频触发。</p>
+          <fieldset class="txaudio-options"><legend>CAT PTT 音频输入</legend>${[['Rear','Rear/Data（后面板 / 数据）'],['Front','Front/Mic（前面板 / 麦克风）']].map(([v,t])=>`<label><input type="radio" name="txaudio" value="${v}" ${v===(['Rear','Data'].includes(r.txAudioSource)?'Rear':'Front')?'checked':''}>${t}</label>`).join('')}<p id="txaudio-note" class="radio-net-help-v4"></p></fieldset>
           <div class="radio-net-ptt-actions-balanced-v7"><button id="radio-test-ptt" data-online="false" aria-pressed="false">测试 PTT</button></div>
         </div>
-        <div class="radio-net-ptt-note-balanced-v7">可以同时使用 NET rigctl 控制频率，并通过 RTS、DTR 或 VOX 控制发射。</div>
+        <div class="radio-net-ptt-note-balanced-v7">电台后端与 PTT 方式独立选择，切换后端保留各自配置。</div>
       </div>
     </div>
   </div>`
@@ -949,8 +1030,8 @@ function installWailsEvents(root:Element){
   runtime.EventsOn('audio:devices',(v:any)=>{audioDevices={inputs:(v?.inputs||[]),outputs:(v?.outputs||[])};populateSettingsAudioDevices()});runtime.EventsOn('audio:state',(v:any)=>{receiverBusy=false;rxRunning=!!v?.running;const st=document.querySelector('#audio-status');if(st)st.textContent=rxRunning?(recordState.active?'RX ACTIVE · REC':'RX ACTIVE'):'RX STOPPED';document.querySelector('.led')?.classList.toggle('on',rxRunning);updateMonitorControls();if(v?.error)setToast(`监听失败：${v.error}`)})
   runtime.EventsOn('detector:candidate',(c:any)=>{const e=document.querySelector('#candidate-count');if(e)e.textContent=String(Array.isArray(c)?c.length:0)});runtime.EventsOn('frequency:rx',(v:any)=>{const n=Number(typeof v==='number'?v:v?.frequencyHz);if(Number.isFinite(n))applyRXFrequency(n,false)});runtime.EventsOn('frequency:tx',(v:any)=>{const n=Number(typeof v==='number'?v:v?.frequencyHz);if(Number.isFinite(n))applyTXFrequency(n,false)})
   runtime.EventsOn('file:result',(v:any)=>{if(v?.ok){const action=v.action==='open-adi'?'JTTY.adi 日志已打开':v.action==='delete-all'?'ALL.txt 已删除':v.action==='delete-adi'?'JTTY.adi 已删除':'日志目录已打开';setToast(action)}else setToast(`文件操作失败：${v?.error||'unknown'}`)})
-  runtime.EventsOn('audio:meter',(v:any)=>{if(Number.isFinite(Number(v?.dbfs)))audioInputDbfs=Math.max(-120,Math.min(0,Number(v.dbfs)));updateMeters()});runtime.EventsOn('radio:meter-capabilities',(v:any)=>{radioMeterCapabilities={strength:!!v?.strength,alc:!!v?.alc,powerWatts:!!v?.powerWatts,powerPercent:!!v?.powerPercent,swr:!!v?.swr};updateMeters()});runtime.EventsOn('radio:meter',(v:any)=>{radioMeterValues={...radioMeterValues,rxDb:finiteOrNull(v?.rxDb),alc:finiteOrNull(v?.alc),powerWatts:finiteOrNull(v?.powerWatts),powerPercent:finiteOrNull(v?.powerPercent),swr:finiteOrNull(v?.swr),transmitting:!!v?.transmitting};updateMeters()});runtime.EventsOn('radio:state',(v:any)=>{radioConnected=!!v?.connected;const e=document.querySelector('#radio-status');if(e)e.textContent=radioConnected?'RADIO CONNECTED':(v?.controlMode||'RADIO DISCONNECTED');if(Number.isFinite(Number(v?.frequencyHz)))setDialFrequency(Number(v.frequencyHz));if(typeof v?.mode==='string'){dialMode=v.mode;const mode=document.querySelector('#dial-mode');if(mode)mode.textContent=dialMode}});runtime.EventsOn('band:state',(v:any)=>{if(typeof v?.band==='string')activeBand=v.band.replace(/m$/i,'');root.querySelectorAll('[data-band]').forEach(x=>x.classList.toggle('active',(x as HTMLElement).dataset.band===activeBand));if(Number.isFinite(Number(v?.frequencyHz)))setDialFrequency(Number(v.frequencyHz))});runtime.EventsOn('frequency:error',(v:any)=>setToast(`频率切换失败：${v?.error||'未知错误'}`))
-  runtime.EventsOn('radio:test-result',(v:any)=>handleRadioTestResult(v));runtime.EventsOn('radio:serial-ports',(v:any)=>{serialPorts=Array.isArray(v)?v.map((x:any)=>String(x)).filter(Boolean):[];populateSerialPorts()});runtime.EventsOn('hamlib:models',(v:any)=>{const next=Array.isArray(v)?v:[];const same=next.length===hamlibModels.length&&next.every((m:any,i:number)=>Number(m?.modelId)===Number(hamlibModels[i]?.modelId)&&String(m?.label||'')===String(hamlibModels[i]?.label||''));if(same)return;hamlibModels=next;populateHamlibModels()});runtime.EventsOn('hamlib:capabilities',(v:any)=>{
+  runtime.EventsOn('audio:meter',(v:any)=>{if(Number.isFinite(Number(v?.dbfs)))audioInputDbfs=Math.max(-120,Math.min(0,Number(v.dbfs)));updateMeters()});runtime.EventsOn('radio:meter-capabilities',(v:any)=>{radioMeterCapabilities={strength:!!v?.strength,alc:!!v?.alc,powerWatts:!!v?.powerWatts,powerPercent:!!v?.powerPercent,swr:!!v?.swr};updateMeters()});runtime.EventsOn('radio:meter',(v:any)=>{radioMeterValues={...radioMeterValues,rxDb:finiteOrNull(v?.rxDb),alc:finiteOrNull(v?.alc),powerWatts:finiteOrNull(v?.powerWatts),powerPercent:finiteOrNull(v?.powerPercent),swr:finiteOrNull(v?.swr),transmitting:!!v?.transmitting};updateMeters()});runtime.EventsOn('radio:state',(v:any)=>{radioConnected=!!v?.connected;const e=document.querySelector('#radio-status');if(e){const labels:any={connecting:'正在连接',connected:'已连接',limited:'功能受限',fault:'连接故障',disconnected:'已断开'};e.textContent=`${v?.backend==='hamlib-local'?'HAMLIB':'NET RIGCTL'} ${labels[v?.status]||(radioConnected?'已连接':'已断开')}`;e.setAttribute('title',[v?.error,...(v?.warnings||[])].filter(Boolean).join('；'))}if(v?.error)setSettingsStatus(v.error);if(Number.isFinite(Number(v?.frequencyHz)))setDialFrequency(Number(v.frequencyHz));if(typeof v?.mode==='string'){dialMode=v.mode;const mode=document.querySelector('#dial-mode');if(mode)mode.textContent=dialMode}});runtime.EventsOn('band:state',(v:any)=>{if(typeof v?.band==='string')activeBand=v.band.replace(/m$/i,'');root.querySelectorAll('[data-band]').forEach(x=>x.classList.toggle('active',(x as HTMLElement).dataset.band===activeBand));if(Number.isFinite(Number(v?.frequencyHz)))setDialFrequency(Number(v.frequencyHz))});runtime.EventsOn('frequency:error',(v:any)=>setToast(`频率切换失败：${v?.error||'未知错误'}`))
+  runtime.EventsOn('radio:test-result',(v:any)=>handleRadioTestResult(v));runtime.EventsOn('radio:serial-ports',(v:any)=>{serialPorts=Array.isArray(v)?v.map((x:any)=>String(x)).filter(Boolean):[];populateSerialPorts();if(settingsTab==='radio'&&document.querySelector('#settings-overlay')?.classList.contains('open'))setSettingsStatus(serialPorts.length?`已刷新，发现 ${serialPorts.length} 个本机串口。请在 CAT / PTT 对应位置选择。`:'未发现本机串口；请检查设备连接，或手动输入设备路径。')});runtime.EventsOn('hamlib:models',(v:any)=>{const next=Array.isArray(v)?v:[];const same=next.length===hamlibModels.length&&next.every((m:any,i:number)=>Number(m?.modelId)===Number(hamlibModels[i]?.modelId)&&String(m?.label||'')===String(hamlibModels[i]?.label||''));if(same)return;hamlibModels=next;populateHamlibModels()});runtime.EventsOn('hamlib:capabilities',(v:any)=>{
     const overlay=document.querySelector<HTMLElement>('#settings-overlay');
     const id=Number(v?.modelId||v?.capabilities?.modelId||0);
     const current=Number(overlay?.querySelector<HTMLSelectElement>('#set-rig-model')?.value||settingsDraft.radio.rigModelId||0);
@@ -1031,6 +1112,9 @@ function handleRadioTestResult(v:any){
           if(!v?.ok){ptt.setAttribute('aria-pressed','false');ptt.classList.remove('ptt-active');stopPTTTestCountdown()}
           updateRadioControlStates(overlay)
         }
+        if(v?.capabilities&&settingsDraft.radio.backend==='hamlib-local'){hamlibCapabilities=v.capabilities;hamlibCapabilitiesModelId=settingsDraft.radio.rigModelId}
+        if(settingsDraft.radio.backend==='rigctld-net')netAudioCapabilities=v?.ok&&v?.capabilities?v.capabilities:null
+        updateRadioControlStates(overlay)
         setSettingsStatus(v?.ok?`rigctld 连接成功：${v.mode||''} ${v.frequencyHz||''} Hz`:`rigctld 连接失败：${v?.error||v?.frequencyError||v?.modeError||'未收到有效响应'}`)
         return
       }
@@ -1239,7 +1323,7 @@ function handleRadioTestResult(v:any){
 
   root.querySelector<HTMLInputElement>('#tx-level')!.addEventListener('input',e=>setTXAudioLevel(Number((e.target as HTMLInputElement).value),true))
   root.querySelector('#clear')!.addEventListener('click',()=>root.querySelector<HTMLInputElement>('#tx')!.value='')
-  root.querySelector<HTMLInputElement>('#dx')!.addEventListener('change',e=>setDX((e.target as HTMLInputElement).value));root.querySelector<HTMLInputElement>('#dx-grid')!.addEventListener('change',e=>{const g=(e.target as HTMLInputElement).value.trim().toUpperCase();dxGrid=g;(e.target as HTMLInputElement).value=g;emitBackendEvent('qso:dxgrid',g)});root.querySelector<HTMLInputElement>('#serial-number')!.addEventListener('change',e=>{const n=Math.max(1,Math.floor(num((e.target as HTMLInputElement).value,settingsState.exchangeSerialNumber)));(e.target as HTMLInputElement).value=String(n);settingsState.exchangeSerialNumber=n;emitBackendEvent('qso:serial-set',n)})
+  root.querySelector<HTMLInputElement>('#dx')!.addEventListener('change',e=>setDX((e.target as HTMLInputElement).value));root.querySelector<HTMLInputElement>('#dx-grid')!.addEventListener('change',e=>{const g=(e.target as HTMLInputElement).value.trim().toUpperCase();dxGrid=g;(e.target as HTMLInputElement).value=g;emitBackendEvent('qso:set-dxgrid',g)});root.querySelector<HTMLInputElement>('#serial-number')!.addEventListener('change',e=>{const n=Math.max(1,Math.floor(num((e.target as HTMLInputElement).value,settingsState.exchangeSerialNumber)));(e.target as HTMLInputElement).value=String(n);settingsState.exchangeSerialNumber=n;emitBackendEvent('qso:serial-set',n)})
   root.querySelector('#save-apply')!.addEventListener('click',()=>{emitSaveOptions();root.querySelector('#save-popup')!.classList.remove('open')})
   updateSavePopup()
   root.querySelector('#send')!.addEventListener('click',()=>{const call=setDX(root.querySelector<HTMLInputElement>('#dx')?.value||'');const message=root.querySelector<HTMLInputElement>('#tx')!.value;emitBackendEvent('tx:send',{call,message})})
