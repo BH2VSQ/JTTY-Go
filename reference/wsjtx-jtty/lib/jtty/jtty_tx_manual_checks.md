@@ -3,9 +3,36 @@
 These checks cover MainWindow, PTT, and backend behavior that is outside the
 FIFO unit-test boundary.
 
+- Free entry: Enter queues the whole message. Text longer than the encoder's
+  80-character capacity is split at spaces where possible; longer words are
+  split across messages. Each segment has its own end marker, and the receiver
+  displays separate messages. The exchange profile and transmit frequency are
+  captured when the message is submitted.
+- Pending text: the existing Send button shows `Send (3 left)` while segments
+  remain, including the segment currently playing. Its tooltip shows the
+  pending text. Yellow transmit text appears when the audio source starts
+  serving each segment; it does not confirm reception. Completion waits for
+  the backend's final audio drain.
+- Status bar: long `Tx:` and `Last Tx:` messages use an ellipsis to leave room
+  for the other indicators. Hover to read the complete message.
+- Drafts: typing while transmitting starts a new draft; Enter appends it after
+  existing text. Halt Tx or Esc cancels all unfinished submissions and leaves the
+  new draft alone. Cancellation is reported in the Send tooltip;
+  partial transmission may already have occurred. No cancelled text is restored
+  to the input, and nothing is retained across application exit.
+- Long entry: send enough text to exceed 60 seconds of encoded audio. Verify
+  continuous playback, ordered segments, and reception of the final suffix.
+  Repeat with an exactly 80-character segment appended during playback.
+- Cancellation: stop before PTT rises and during playback, then send a fresh
+  long message. Verify that cancelled text never resumes, deferred text never
+  appears yellow, and the new message starts normally. Repeat with Esc, a mode
+  change, and an audio/backend failure. Check that newer draft edits survive.
+- Normalization: enter unsupported characters after character 80. Verify the
+  substitution notice in the Send tooltip and canonical pending text, with no
+  omitted suffix.
 - Soundcard: send one JTTY message and verify the full tail plays before PTT drops.
 - Soundcard: queue two or three messages rapidly and verify playback is contiguous with PTT held.
-- Soundcard: press Stop during playback and verify queued audio is abandoned before PTT drops.
+- Soundcard: press Halt Tx during playback and verify queued audio is abandoned before PTT drops.
 - Soundcard: press Esc before PTT comes up and during playback and verify clean aborts.
 - Soundcard: send again after a natural drain and verify a fresh transmit session starts.
 - TCI, where available: repeat the same checks and watch for backend enqueue failure warnings.
@@ -33,8 +60,8 @@ FIFO unit-test boundary.
   frame, with the canonical text shown and logged. Verify bare `001` retains
   its spelling and is not inferred as SERIAL. Verify unsupported serial
   tokens (over six digits or above 131071) retain their spelling. Verify a
-  message whose serial normalization expands beyond 80 characters is rejected
-  rather than truncated. Submit a message, change activity
+  message whose serial normalization expands beyond 80 characters is split
+  without omitting the remainder. Submit a message, change activity
   before it plays, and verify the submitted message retains its captured
   profile. Repeat through untagged N1MM/MMTTY and customized macro fallback.
 - sjtty: compare default and leading `--exchange-profile=rtty-roundup` with

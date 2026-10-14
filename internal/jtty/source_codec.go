@@ -157,7 +157,7 @@ func normalizeJTTYMessage(raw string) string {
 		b.WriteString(c)
 		lastSpace = false
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), " ")
 }
 
 func sourceIndex(c string) int {

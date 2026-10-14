@@ -1,7 +1,10 @@
 # WSJT-X JTTY reference sources
 
 This directory contains selected JTTY-related source files copied from the
-user-provided `wsjtx-3.2.0-rc1-src.tar.gz` archive. They are retained as an
+original user-provided `wsjtx-3.2.0-rc1-src.tar.gz` archive, refreshed against
+WSJT-X commit `9d059511f77e2d1be746ebfeaa7f88e77c1babb7` (release/3.3, 2026-10-13).
+`SOURCE_ARCHIVE_SHA256.txt` records the original archive; `UPSTREAM_COMMIT.txt`
+records the current algorithm baseline. They are retained as an
 algorithmic and interoperability reference for JTTY-Go.
 
 The reference files remain governed by the WSJT-X project license and source

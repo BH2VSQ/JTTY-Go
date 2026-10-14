@@ -627,3 +627,5 @@ html::-webkit-scrollbar,body::-webkit-scrollbar,#app::-webkit-scrollbar,.shell::
 @media(max-width:900px){.radio-net-balanced-layout-v7 .radio-net-columns-balanced-v7{grid-template-columns:minmax(0,1fr)!important}.radio-net-balanced-layout-v7 .radio-net-ptt-balanced-v7{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
 @media(max-width:520px){.radio-net-balanced-layout-v7 .radio-net-ptt-port-row-v5{grid-template-columns:minmax(0,1fr)}.radio-net-balanced-layout-v7 .radio-net-ptt-balanced-v7{grid-template-columns:minmax(0,1fr)!important}}
 
+/* Reception status belongs to the displayed row, never the logged message text. */
+.jtty-reception-state { margin-left: 8px; font-size: 10px; font-weight: normal; opacity: .65; white-space: nowrap; }

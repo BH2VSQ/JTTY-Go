@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -57,6 +56,9 @@ type App struct {
 	settingsSaveMu       sync.Mutex
 	frequencyMu          sync.RWMutex
 	radioMu              sync.Mutex
+	radioLifecycleMu     sync.Mutex
+	radioConfig          model.RadioSettings
+	radioCaps            radio.HamlibCapabilities
 	meterMu              sync.Mutex
 	settings             model.Settings
 	rxFrequency          int
@@ -128,9 +130,6 @@ type App struct {
 	lastWaterfallEmitNS  atomic.Int64
 	lastCandidateEmitNS  atomic.Int64
 	rxPaused             atomic.Bool
-	txWaveScratch        []float32
-	txDphiScratch        []float64
-	txPulseScratch       []float64
 }
 
 func New() *App {
@@ -614,7 +613,7 @@ func (a *App) Startup(ctx context.Context) {
 		_ = a.DisconnectRadio()
 	})
 	wailsruntime.EventsOn(ctx, "radio:test-cat", func(data ...interface{}) {
-		result := a.TestRadio()
+		var result map[string]any
 		if len(data) > 0 {
 			b, err := json.Marshal(data[0])
 			if err == nil {
@@ -623,6 +622,9 @@ func (a *App) Startup(ctx context.Context) {
 					result = a.TestRadioSettings(draft)
 				}
 			}
+		}
+		if result == nil {
+			result = a.TestRadio()
 		}
 		result["kind"] = "cat"
 		a.emit(model.EventRadioTest, result)
@@ -888,88 +890,11 @@ func (a *App) Startup(ctx context.Context) {
 			a.emit(model.EventHamlibStatus, status)
 		}()
 	})
-	wailsruntime.EventsOn(ctx, "hamlib:update", func(data ...interface{}) {
-		arch := "64"
-		if len(data) > 0 {
-			if v, ok := data[0].(string); ok && v != "" {
-				arch = v
-			}
-		}
-		a.hamlibGeneration.Add(1)
-		a.hamlibCacheMu.Lock()
-		a.hamlibModelsCached = false
-		a.hamlibModelsCache = nil
-		a.hamlibCapsCache = make(map[int]radio.HamlibCapabilities)
-		a.hamlibStatusCache = nil
-		a.hamlibCacheMu.Unlock()
-
-		go func() {
-			ctxOp, done := a.beginHamlibOperation(90 * time.Second)
-			defer done()
-			_ = a.DisconnectRadio()
-			status, err := radio.UpdateHamlib(ctxOp, arch, a.hamlibInstallDir())
-			if err != nil {
-				if ctxOp.Err() != nil {
-					return
-				}
-				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
-				return
-			}
-			if verified, probeErr := radio.HamlibStatusWithExecutableContext(ctxOp, arch, a.hamlibInstallDir(), a.hamlibExecutable()); probeErr == nil {
-				status = verified
-			}
-			a.hamlibCacheMu.Lock()
-			statusCopy := status
-			a.hamlibStatusCache = &statusCopy
-			a.hamlibCacheMu.Unlock()
-			a.emit(model.EventHamlibStatus, status)
-			if models, modelErr := radio.ListHamlibModels(ctxOp, a.hamlibExecutable()); modelErr == nil && ctxOp.Err() == nil {
-				a.hamlibCacheMu.Lock()
-				a.hamlibModelsCache = cloneHamlibModels(models)
-				a.hamlibModelsCached = true
-				a.hamlibCacheMu.Unlock()
-				a.emit(model.EventHamlibModels, models)
-			}
-		}()
-	})
-	wailsruntime.EventsOn(ctx, "hamlib:revert", func(data ...interface{}) {
-		arch := "64"
-		if len(data) > 0 {
-			if v, ok := data[0].(string); ok && v != "" {
-				arch = v
-			}
-		}
-		a.hamlibGeneration.Add(1)
-		a.invalidateHamlibCaches()
-		go func() {
-			ctxOp, done := a.beginHamlibOperation(90 * time.Second)
-			defer done()
-			_ = a.DisconnectRadio()
-			status, err := radio.RevertHamlib(arch, a.hamlibInstallDir())
-			if err != nil {
-				if ctxOp.Err() != nil {
-					return
-				}
-				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
-				return
-			}
-			if verified, probeErr := radio.HamlibStatusWithExecutableContext(ctxOp, arch, a.hamlibInstallDir(), a.hamlibExecutable()); probeErr == nil {
-				status = verified
-			}
-			a.hamlibCacheMu.Lock()
-			statusCopy := status
-			a.hamlibStatusCache = &statusCopy
-			a.hamlibCacheMu.Unlock()
-			a.emit(model.EventHamlibStatus, status)
-			if models, modelErr := radio.ListHamlibModels(ctxOp, a.hamlibExecutable()); modelErr == nil && ctxOp.Err() == nil {
-				a.hamlibCacheMu.Lock()
-				a.hamlibModelsCache = cloneHamlibModels(models)
-				a.hamlibModelsCached = true
-				a.hamlibCacheMu.Unlock()
-				a.emit(model.EventHamlibModels, models)
-			}
-		}()
-	})
+	for _, event := range []string{"hamlib:update", "hamlib:revert"} {
+		wailsruntime.EventsOn(ctx, event, func(data ...interface{}) {
+			a.emit(model.EventSettingsError, map[string]any{"error": "Hamlib 随完整应用包升级，已禁用单 DLL 替换"})
+		})
+	}
 	wailsruntime.EventsOn(ctx, "file:open-adi", func(data ...interface{}) {
 		_ = data
 		err := a.OpenADIFLog()
@@ -1011,61 +936,9 @@ func (a *App) Startup(ctx context.Context) {
 
 func normalizeLoadedSettings(s model.Settings, recordDir string) (model.Settings, bool) {
 	changed := false
-	// NET radio activation is a persisted property, independent from PTT.
-	// Legacy NET backend names are migrated to the canonical rigctld-net value.
-	storedBackend := strings.ToLower(strings.TrimSpace(s.Radio.Backend))
-	legacyNoRig := storedBackend == "hamlib-rigctld" && s.Radio.RigModelID <= 0 && !s.Radio.Enabled
-	shouldEnableNET := s.Radio.Enabled || storedBackend == "rigctld-net" || storedBackend == "hamlib-net-rigctl" || (storedBackend == "hamlib-rigctld" && s.Radio.RigModelID > 0)
-	if s.Radio.Enabled != shouldEnableNET {
-		s.Radio.Enabled = shouldEnableNET
-		changed = true
-	}
-	if shouldEnableNET {
-		if s.Radio.Backend != "rigctld-net" {
-			changed = true
-		}
-		s.Radio.Backend = "rigctld-net"
-	} else {
-		if s.Radio.Backend != "none" {
-			changed = true
-		}
-		s.Radio.Backend = "none"
-		if s.Radio.RigModelID != 0 || s.Radio.RigName != "None" {
-			changed = true
-		}
-		s.Radio.RigModelID = 0
-		s.Radio.RigName = "None"
-	}
-	// Keep the historical fallback only for the exact legacy local-Hamlib
-	// representation. The explicit NET Enabled field must survive RTS/DTR/VOX.
-	if legacyNoRig {
-		if !strings.EqualFold(strings.TrimSpace(s.Radio.PTTMethod), "VOX") {
-			s.Radio.PTTMethod = "VOX"
-			changed = true
-		}
-	} else {
-		normalizedPTTMethod := strings.ToUpper(strings.TrimSpace(s.Radio.PTTMethod))
-		switch normalizedPTTMethod {
-		case "CAT", "RIGCTL":
-			if s.Radio.PTTMethod != "Rigctl" {
-				s.Radio.PTTMethod = "Rigctl"
-				changed = true
-			}
-		case "DTR", "RTS":
-			if s.Radio.PTTMethod != normalizedPTTMethod {
-				s.Radio.PTTMethod = normalizedPTTMethod
-				changed = true
-			}
-		case "VOX":
-			if s.Radio.PTTMethod != "VOX" {
-				s.Radio.PTTMethod = "VOX"
-				changed = true
-			}
-		default:
-			s.Radio.PTTMethod = "VOX"
-			changed = true
-		}
-	}
+	previousRadio := s.Radio
+	s.Radio = model.NormalizeRadio(s.Radio)
+	changed = previousRadio != s.Radio
 	if strings.TrimSpace(s.Audio.RecordDirectory) == "" {
 		s.Audio.RecordDirectory = recordDir
 		changed = true
@@ -1144,7 +1017,7 @@ func (a *App) deferredStartup() {
 			a.emit(model.EventAudioState, map[string]any{"running": false, "error": err.Error()})
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(s.Radio.Backend), "rigctld-net") {
+	if s.Radio.Enabled {
 		time.Sleep(250 * time.Millisecond)
 		if err := a.ConnectRadio(); err != nil {
 			a.emit(model.EventRadioTest, map[string]any{"ok": false, "kind": "connect", "error": err.Error()})
@@ -1210,51 +1083,24 @@ func (a *App) persistSettings(settings model.Settings) error {
 // sameRadioControlConfig excludes fields owned by the independent PTT block.
 // PTT changes must not disconnect/reconnect the NET frequency-control session.
 func sameRadioControlConfig(a, b model.RadioSettings) bool {
-	a.PTTMethod, b.PTTMethod = "", ""
+	if a.Backend != "hamlib-local" && b.Backend != "hamlib-local" {
+		a.PTTMethod, b.PTTMethod = "", ""
+	}
 	a.PTTSerialPort, b.PTTSerialPort = "", ""
 	a.ForceDTR, b.ForceDTR = "", ""
 	a.ForceRTS, b.ForceRTS = "", ""
+	a.Local, b.Local = model.RadioProfile{}, model.RadioProfile{}
+	a.NET, b.NET = model.RadioProfile{}, model.RadioProfile{}
 	return a == b
 }
 
 func (a *App) SaveSettings(settings model.Settings) error {
+	a.stopRadioAudio()
 	// A configuration test session is transient. Close it before applying
 	// settings. If the settings dialog had temporarily displaced a live radio,
 	// remember that fact so the live connection is restored after the save.
 	testRestoreLive := a.closeTestRadio(false)
-	// The explicit Enabled flag controls NET connection activation. PTT is independent.
-	storedBackend := strings.ToLower(strings.TrimSpace(settings.Radio.Backend))
-	legacyNoRig := storedBackend == "hamlib-rigctld" && settings.Radio.RigModelID <= 0 && !settings.Radio.Enabled
-	shouldEnableNET := settings.Radio.Enabled || storedBackend == "rigctld-net" || storedBackend == "hamlib-net-rigctl" || (storedBackend == "hamlib-rigctld" && settings.Radio.RigModelID > 0)
-	settings.Radio.Enabled = shouldEnableNET
-	if shouldEnableNET {
-		settings.Radio.Backend = "rigctld-net"
-	} else {
-		settings.Radio.Backend = "none"
-		settings.Radio.RigModelID = 0
-		settings.Radio.RigName = "None"
-	}
-	if legacyNoRig {
-		settings.Radio.PTTMethod = "VOX"
-	} else {
-		normalizedPTTMethod := strings.ToUpper(strings.TrimSpace(settings.Radio.PTTMethod))
-		switch normalizedPTTMethod {
-		case "CAT", "RIGCTL":
-			settings.Radio.PTTMethod = "Rigctl"
-		case "DTR", "RTS":
-			settings.Radio.PTTMethod = normalizedPTTMethod
-		case "VOX":
-			settings.Radio.PTTMethod = "VOX"
-		default:
-			settings.Radio.PTTMethod = "VOX"
-		}
-	}
-	if strings.TrimSpace(settings.Radio.Host) == "" {
-		settings.Radio.Host = "127.0.0.1"
-	}
-	if settings.Radio.Port < 1 || settings.Radio.Port > 65535 {
-		settings.Radio.Port = 4532
-	}
+	settings.Radio = model.NormalizeRadio(settings.Radio)
 	if strings.TrimSpace(settings.Audio.RecordDirectory) == "" {
 		settings.Audio.RecordDirectory = filepath.Join(a.dataDir(), "record")
 	}
@@ -1376,9 +1222,21 @@ func (a *App) SaveSettings(settings model.Settings) error {
 		}
 	}
 	radioChanged := !sameRadioControlConfig(old.Radio, settings.Radio)
+	if !radioChanged {
+		a.radioMu.Lock()
+		if a.radio != nil {
+			a.radioConfig = settings.Radio
+		}
+		a.radioMu.Unlock()
+		if old.Radio.PTTSerialPort != settings.Radio.PTTSerialPort || old.Radio.PTTMethod != settings.Radio.PTTMethod {
+			if a.pttSerial != nil {
+				_ = a.pttSerial.Close()
+			}
+		}
+	}
 	if radioChanged || testRestoreLive {
 		_ = a.DisconnectRadio()
-		if strings.EqualFold(strings.TrimSpace(settings.Radio.Backend), "rigctld-net") {
+		if settings.Radio.Enabled {
 			go func() {
 				if err := a.ConnectRadio(); err != nil {
 					a.emit(model.EventRadioTest, map[string]any{"ok": false, "kind": "connect", "error": err.Error()})
@@ -2033,27 +1891,13 @@ func (a *App) ensureBundledHamlib() error {
 }
 
 func (a *App) hamlibExecutable() string {
-	_ = a.ensureBundledHamlib()
-	base := a.bundledHamlibDir()
-	// The released application always prefers its bundled rigctld. The
-	// configured path is retained only as a development fallback when the
-	// bundled binary is not present.
-	bundled := filepath.Join(base, "rigctld.exe")
-	if fi, err := os.Stat(bundled); err == nil && !fi.IsDir() {
-		return bundled
-	}
 	a.settingsMu.RLock()
-	path := strings.TrimSpace(a.settings.Radio.RigctldPath)
+	cfg := a.settings.Radio
 	a.settingsMu.RUnlock()
-	if path != "" {
-		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
-			return path
-		}
-		if resolved, err := exec.LookPath(path); err == nil {
-			return resolved
-		}
+	if cfg.Backend != "hamlib-local" {
+		cfg.RigctldPath = cfg.Local.RigctldPath
 	}
-	return ""
+	return a.resolveRigctldForConfig(cfg)
 }
 
 func (a *App) hamlibInstallDir() string {
@@ -2091,75 +1935,20 @@ func prependHamlibPath(env []string, dir string) []string {
 }
 
 func (a *App) resolveRigctldForConfig(cfg model.RadioSettings) string {
-	_ = a.ensureBundledHamlib()
-	base := a.bundledHamlibDir()
-	bundled := filepath.Join(base, "rigctld.exe")
-	if fi, err := os.Stat(bundled); err == nil && !fi.IsDir() {
-		return bundled
-	}
-	path := strings.TrimSpace(cfg.RigctldPath)
-	if path != "" {
-		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+	if path := strings.TrimSpace(cfg.RigctldPath); path != "" {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return path
 		}
-		if resolved, err := exec.LookPath(path); err == nil {
-			return resolved
+		return ""
+	}
+	for _, path := range a.hamlibRuntimeCandidates() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
 		}
 	}
 	return ""
 }
 
-func (a *App) startRigctld(cfg model.RadioSettings, track bool) (*exec.Cmd, bool) {
-	executable := a.resolveRigctldForConfig(cfg)
-	if executable == "" {
-		return nil, false
-	}
-	host := cfg.Host
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	if host != "127.0.0.1" && host != "localhost" {
-		return nil, false
-	}
-	tcpPort := cfg.Port
-	if tcpPort <= 0 {
-		tcpPort = 4532
-	}
-	serialPort := strings.TrimSpace(cfg.SerialPort)
-	if serialPort == "" {
-		ports := radio.AvailableSerialPorts()
-		if len(ports) > 0 {
-			serialPort = ports[0]
-		}
-	}
-	if serialPort == "" {
-		return nil, false
-	}
-	args := buildRigctldArgs(cfg, host, tcpPort, serialPort)
-	cmd := newHiddenCommand(executable, args...)
-	cmd.Dir = filepath.Dir(executable)
-	cmd.Env = prependHamlibPath(cmd.Environ(), filepath.Dir(executable))
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		return nil, false
-	}
-	if track {
-		a.radioMu.Lock()
-		old := a.rigctldCmd
-		a.rigctldCmd = cmd
-		a.radioMu.Unlock()
-		if old != nil && old.Process != nil && old != cmd {
-			_ = old.Process.Kill()
-			_ = old.Wait()
-		}
-	}
-	return cmd, true
-}
-
-// buildRigctldArgs mirrors the relevant WSJT-X/Hamlib serial and PTT
-// configuration semantics while retaining JTTY-Go's local rigctld architecture.
-// Hamlib accepts backend-specific parameters through --set-conf/-C.
 func buildRigctldArgs(cfg model.RadioSettings, host string, tcpPort int, serialPort string) []string {
 	baud := cfg.Baud
 	if baud <= 0 {
@@ -2225,11 +2014,6 @@ func buildRigctldArgs(cfg model.RadioSettings, host string, tcpPort int, serialP
 	return args
 }
 
-func (a *App) maybeStartRigctld(cfg model.RadioSettings) bool {
-	_, ok := a.startRigctld(cfg, true)
-	return ok
-}
-
 func (a *App) stopRadioPolling() {
 	a.radioMu.Lock()
 	cancel := a.pollCancel
@@ -2289,6 +2073,13 @@ func (a *App) pollRadioState() {
 	if me != nil {
 		st["modeError"] = me.Error()
 	}
+	st["backend"] = backend
+	st["status"] = "connected"
+	if fe != nil || me != nil {
+		st["status"] = "fault"
+		st["error"] = fmt.Sprintf("电台状态读取失败: %v %v", fe, me)
+		a.stopRadioAudio()
+	}
 	if fe == nil {
 		a.frequencyMu.Lock()
 		a.dialFrequency = freq
@@ -2300,142 +2091,131 @@ func (a *App) setPTT(on bool) error {
 	a.settingsMu.RLock()
 	cfg := a.settings.Radio
 	a.settingsMu.RUnlock()
-	method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
-	switch method {
-	case "", "VOX":
-		// VOX is triggered by the outgoing audio; no CAT PTT command is sent.
-		return nil
-	case "DTR", "RTS":
-		return a.setSerialPTTForConfig(cfg, method, on)
-	case "CAT", "RIGCTL":
-		// CAT is kept as a legacy config alias. The network UI uses Rigctl.
-	default:
-		return fmt.Errorf("不支持的 PTT 方法: %s", method)
-	}
 	a.radioMu.Lock()
 	r := a.radio
+	if r != nil {
+		cfg = a.radioConfig
+	}
 	a.radioMu.Unlock()
+	method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
+	if method == "" || method == "VOX" {
+		return nil
+	}
+	if (method == "DTR" || method == "RTS") && cfg.Backend != "hamlib-local" {
+		return a.setSerialPTTForConfig(cfg, method, on)
+	}
 	if r == nil {
-		return fmt.Errorf("NET rigctl 电台尚未连接")
+		return fmt.Errorf("电台尚未连接")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := r.PTT(ctx, on); err != nil {
-		return fmt.Errorf("rigctld PTT 命令失败: %w", err)
+		a.emit(model.EventRadioState, map[string]any{"connected": false, "status": "fault", "pttKnown": false, "error": err.Error()})
+		return err
 	}
 	return nil
 }
 
 func (a *App) ConnectRadio() error {
+	a.radioLifecycleMu.Lock()
+	defer a.radioLifecycleMu.Unlock()
+	a.stopRadioAudio()
+	if err := a.disconnectRadio(); err != nil {
+		return err
+	}
 	a.settingsMu.RLock()
 	cfg := a.settings.Radio
 	a.settingsMu.RUnlock()
-	if !strings.EqualFold(strings.TrimSpace(cfg.Backend), "rigctld-net") {
-		return fmt.Errorf("尚未启用 NET rigctl 电台连接")
-	}
-	host := strings.TrimSpace(cfg.Host)
-	if host == "" {
-		return fmt.Errorf("rigctld 服务器地址不能为空")
-	}
-	port := cfg.Port
-	if port < 1 || port > 65535 {
-		return fmt.Errorf("rigctld TCP 端口无效: %d", port)
-	}
-
-	r := radio.NewRigctld(radio.RigctldConfig{Address: host, Port: port, Mode: cfg.Mode, PassbandHz: cfg.PassbandHz})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	err := r.Open(ctx)
-	cancel()
+	a.emit(model.EventRadioState, map[string]any{"connected": false, "status": "connecting", "backend": cfg.Backend})
+	r, caps, err := a.openConfiguredRadio(cfg)
 	if err != nil {
-		return fmt.Errorf("连接 rigctld %s:%d 失败: %w", host, port, err)
+		a.emit(model.EventRadioState, map[string]any{"connected": false, "status": "fault", "error": err.Error()})
+		return err
 	}
-
-	modeSetError := ""
-	if requestedMode := strings.TrimSpace(cfg.Mode); requestedMode != "" {
-		ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
-		err = r.SetMode(ctx, requestedMode)
-		cancel()
-		if err != nil {
-			// Some rigs expose different mode tokens. Keep the connection usable
-			// and report a rejected startup mode to the operator.
-			modeSetError = err.Error()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	warnings := []string{}
+	if cfg.Mode != "" {
+		if err := r.SetMode(ctx, cfg.Mode); err != nil {
+			warnings = append(warnings, err.Error())
 		}
 	}
-	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
 	freq, fe := r.Frequency(ctx)
 	mode, me := r.Mode(ctx)
-	cancel()
-	if fe != nil && me != nil {
-		_ = r.Close()
-		return fmt.Errorf("已连接 rigctld，但无法读取频率和模式: %v; %v", fe, me)
-	}
-
-	a.radioMu.Lock()
-	old := a.radio
-	a.radio = r
-	a.radioMu.Unlock()
-	if old != nil {
-		_ = old.Close()
-	}
-	// Frequency/mode connection does not probe or toggle independent PTT hardware.
-	if strings.EqualFold(strings.TrimSpace(cfg.SplitMode), "Rig") {
-		ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
-		_ = r.SetSplit(ctx, "VFOB")
-		if fe == nil {
-			_ = r.SetSplitFrequency(ctx, freq)
-		}
-		cancel()
-	}
-	if fe == nil {
-		a.frequencyMu.Lock()
-		a.dialFrequency = freq
-		a.frequencyMu.Unlock()
-	}
-	st := map[string]any{"connected": true, "frequencyHz": freq, "mode": mode, "controlMode": radioControlMode(cfg.Backend, cfg.PTTMethod), "host": host, "port": port}
 	if fe != nil {
-		st["frequencyError"] = fe.Error()
+		_ = r.Close()
+		return fe
 	}
 	if me != nil {
-		st["modeError"] = me.Error()
+		warnings = append(warnings, me.Error())
 	}
-	if modeSetError != "" {
-		st["modeSetError"] = modeSetError
+	if cfg.SplitMode == "Rig" || cfg.SplitMode == "None" {
+		if caps.HasSetSplitVFO && caps.HasGetSplitVFO {
+			if err := configureSplit(ctx, r, cfg.SplitMode == "Rig", freq); err != nil {
+				warnings = append(warnings, "Split: "+err.Error())
+			}
+		} else if cfg.SplitMode == "Rig" {
+			warnings = append(warnings, "电台不支持 Split")
+		}
 	}
-	a.emit(model.EventRadioState, st)
+	a.radioMu.Lock()
+	a.radio = r
+	a.radioConfig = cfg
+	a.radioCaps = caps
+	a.radioMu.Unlock()
+	a.radioTestMu.Lock()
+	a.testRestoreLiveRadio = false
+	a.radioTestMu.Unlock()
+	a.frequencyMu.Lock()
+	a.dialFrequency = freq
+	a.frequencyMu.Unlock()
+	status := "connected"
+	if len(warnings) > 0 {
+		status = "limited"
+	}
+	a.emit(model.EventRadioState, map[string]any{"connected": true, "status": status, "backend": cfg.Backend, "frequencyHz": freq, "mode": mode, "warnings": warnings, "controlMode": radioControlMode(cfg.Backend, cfg.PTTMethod), "capabilities": caps})
 	a.startRadioMeterPolling(r)
 	a.startRadioPolling()
 	return nil
 }
 
 func (a *App) DisconnectRadio() error {
+	a.radioLifecycleMu.Lock()
+	defer a.radioLifecycleMu.Unlock()
+	a.stopRadioAudio()
+	a.radioTestMu.Lock()
+	a.testRestoreLiveRadio = false
+	a.radioTestMu.Unlock()
+	return a.disconnectRadio()
+}
+
+func (a *App) disconnectRadio() error {
 	a.stopRadioPolling()
 	a.stopRadioMeterPolling()
-	_ = a.setPTT(false)
 	a.radioMu.Lock()
 	r := a.radio
 	a.radio = nil
-	cmd := a.rigctldCmd
-	a.rigctldCmd = nil
+	cfg := a.radioConfig
 	a.radioMu.Unlock()
 	var err error
 	if r != nil {
 		err = r.Close()
 	}
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+	if a.pttSerial != nil {
+		if e := a.pttSerial.Close(); err == nil {
+			err = e
+		}
 	}
-	a.settingsMu.RLock()
-	backend := a.settings.Radio.Backend
-	pttMethod := a.settings.Radio.PTTMethod
-	mode := a.settings.Radio.Mode
-	a.settingsMu.RUnlock()
-	a.frequencyMu.RLock()
-	dial := a.dialFrequency
-	a.frequencyMu.RUnlock()
-	a.emit(model.EventRadioState, map[string]any{"connected": false, "frequencyHz": dial, "mode": mode, "controlMode": radioControlMode(backend, pttMethod)})
+	state := map[string]any{"connected": false, "status": "disconnected", "controlMode": radioControlMode(cfg.Backend, cfg.PTTMethod)}
+	if err != nil {
+		state["status"] = "fault"
+		state["error"] = err.Error()
+		state["pttKnown"] = false
+	}
+	a.emit(model.EventRadioState, state)
 	return err
 }
+
 func (a *App) startRadioMeterPolling(r radio.Radio) {
 	a.stopRadioMeterPolling()
 	reader, ok := r.(radio.MeterReader)
@@ -2552,10 +2332,7 @@ func (a *App) setSerialPTTForConfig(cfg model.RadioSettings, method string, on b
 	}
 	port := strings.TrimSpace(cfg.PTTSerialPort)
 	if port == "" {
-		ports := radio.AvailableSerialPorts()
-		if len(ports) > 0 {
-			port = ports[0]
-		}
+		return fmt.Errorf("请选择 PTT 串口")
 	}
 	if port == "" {
 		return fmt.Errorf("没有可用的串行端口")
@@ -2575,7 +2352,7 @@ func testRadioConfigEqual(aCfg, bCfg model.RadioSettings) bool {
 		}
 		return v
 	}
-	return strings.EqualFold(strings.TrimSpace(aCfg.Host), strings.TrimSpace(bCfg.Host)) &&
+	return aCfg.Backend == bCfg.Backend && aCfg.RigModelID == bCfg.RigModelID && aCfg.SerialPort == bCfg.SerialPort && aCfg.RigctldPath == bCfg.RigctldPath && aCfg.Baud == bCfg.Baud && aCfg.DataBits == bCfg.DataBits && aCfg.StopBits == bCfg.StopBits && aCfg.Handshake == bCfg.Handshake && aCfg.TXAudioSource == bCfg.TXAudioSource && strings.EqualFold(strings.TrimSpace(aCfg.Host), strings.TrimSpace(bCfg.Host)) &&
 		aCfg.Port == bCfg.Port &&
 		method(aCfg.PTTMethod) == method(bCfg.PTTMethod) &&
 		strings.EqualFold(strings.TrimSpace(aCfg.PTTSerialPort), strings.TrimSpace(bCfg.PTTSerialPort)) &&
@@ -2595,11 +2372,11 @@ func (a *App) closeTestRadio(restoreLive bool) bool {
 	a.testRigctldCmd = nil
 	a.testRadioCfg = model.RadioSettings{}
 	a.testRadioOnline = false
-	a.testRestoreLiveRadio = false
+	a.testRestoreLiveRadio = !restoreLive && wasLive
 	a.radioTestMu.Unlock()
 
 	method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
-	if method == "DTR" || method == "RTS" {
+	if (method == "DTR" || method == "RTS") && cfg.Backend != "hamlib-local" {
 		_ = a.setSerialPTTForConfig(cfg, method, false)
 	} else if r != nil && method != "VOX" && method != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2633,58 +2410,47 @@ func (a *App) storeTestRadio(r radio.Radio, cmd *exec.Cmd, cfg model.RadioSettin
 }
 
 func (a *App) openTestRadio(cfg model.RadioSettings) (radio.Radio, *exec.Cmd, map[string]any) {
-	host := strings.TrimSpace(cfg.Host)
-	if host == "" {
-		return nil, nil, map[string]any{"ok": false, "error": "rigctld 服务器地址不能为空"}
-	}
-	if cfg.Port < 1 || cfg.Port > 65535 {
-		return nil, nil, map[string]any{"ok": false, "error": "rigctld TCP 端口无效"}
-	}
-	wasRestorePending := a.closeTestRadio(false)
+	a.radioLifecycleMu.Lock()
+	defer a.radioLifecycleMu.Unlock()
+	a.stopRadioAudio()
+	wasPending := a.closeTestRadio(false)
 	a.radioMu.Lock()
-	live := a.radio
+	live := a.radio != nil
 	a.radioMu.Unlock()
-	if live != nil {
-		wasRestorePending = true
-		_ = a.DisconnectRadio()
+	if live {
+		wasPending = true
+		if err := a.disconnectRadio(); err != nil {
+			return nil, nil, map[string]any{"ok": false, "error": err.Error()}
+		}
 	}
 	a.radioTestMu.Lock()
-	a.testRestoreLiveRadio = wasRestorePending
+	a.testRestoreLiveRadio = wasPending
 	a.radioTestMu.Unlock()
-
-	r := radio.NewRigctld(radio.RigctldConfig{Address: host, Port: cfg.Port, Mode: cfg.Mode, PassbandHz: cfg.PassbandHz})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	err := r.Open(ctx)
+	// Drafts retain flat fields for Wails callers; normalize without saving.
+	cfg = model.NormalizeRadio(cfg)
+	r, caps, err := a.openConfiguredRadio(cfg)
 	if err != nil {
-		cancel()
-		_ = r.Close()
-		return nil, nil, map[string]any{"ok": false, "error": fmt.Sprintf("连接 rigctld %s:%d 失败: %v", host, cfg.Port, err)}
+		return nil, nil, map[string]any{"ok": false, "error": err.Error()}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	freq, fe := r.Frequency(ctx)
 	mode, me := r.Mode(ctx)
-	cancel()
 	if fe != nil || me != nil {
 		_ = r.Close()
-		msg := "无法读取电台状态"
-		if fe != nil {
-			msg = fe.Error()
-		} else if me != nil {
-			msg = me.Error()
-		}
-		return nil, nil, map[string]any{"ok": false, "error": msg}
+		return nil, nil, map[string]any{"ok": false, "error": fmt.Sprintf("读取电台状态: %v %v", fe, me)}
 	}
 	a.storeTestRadio(r, nil, cfg)
-	return r, nil, map[string]any{"ok": true, "online": true, "frequencyHz": freq, "mode": mode, "temporaryRigctld": false, "pttEligible": testPTTEligible(cfg), "host": host, "port": cfg.Port}
+	return r, nil, map[string]any{"ok": true, "online": true, "frequencyHz": freq, "mode": mode, "capabilities": caps, "temporaryRigctld": cfg.Backend == "hamlib-local", "pttEligible": testPTTEligible(cfg)}
 }
 
-// radioControlConfigEqual deliberately ignores PTT-only settings. A change
-// from VOX to RTS/DTR (or a PTT-port change) must not disconnect the rigctl
-// frequency/mode controller.
 func radioControlConfigEqual(a, b model.RadioSettings) bool {
 	a.PTTMethod, b.PTTMethod = "", ""
 	a.PTTSerialPort, b.PTTSerialPort = "", ""
 	a.ForceDTR, b.ForceDTR = "", ""
 	a.ForceRTS, b.ForceRTS = "", ""
+	a.Local, b.Local = model.RadioProfile{}, model.RadioProfile{}
+	a.NET, b.NET = model.RadioProfile{}, model.RadioProfile{}
 	return a == b
 }
 
@@ -2828,7 +2594,7 @@ func (a *App) testPTTConfig(cfg model.RadioSettings, on bool) map[string]any {
 		result["error"] = "VOX 由发射音频触发，请使用实际音频测试"
 		return result
 	}
-	if method == "DTR" || method == "RTS" {
+	if (method == "DTR" || method == "RTS") && cfg.Backend != "hamlib-local" {
 		if err := a.setSerialPTTForConfig(cfg, method, on); err != nil {
 			result["error"] = err.Error()
 			return result
@@ -2841,7 +2607,7 @@ func (a *App) testPTTConfig(cfg model.RadioSettings, on bool) map[string]any {
 		result["online"] = true
 		return result
 	}
-	if method != "RIGCTL" && method != "CAT" {
+	if method != "RIGCTL" && method != "CAT" && !(cfg.Backend == "hamlib-local" && (method == "DTR" || method == "RTS")) {
 		result["error"] = "不支持的 PTT 方法: " + method
 		return result
 	}
@@ -2944,20 +2710,16 @@ func (a *App) transmitJTTY(macroID, message string) {
 	if message == "" {
 		return
 	}
-	frames, canonical, err := jtty.PackMessage(message, jtty.ExchangeUnknown)
+	segments, canonical, err := jtty.PackTransmitLine(message, jtty.ExchangeUnknown)
 	if err != nil {
 		a.emitRaw("tx:error", map[string]any{"error": err.Error()})
 		return
 	}
-	if len(frames) == 0 {
-		return
+	var frames []jtty.PackedFrame
+	for _, segment := range segments {
+		frames = append(frames, segment.Frames...)
 	}
-	// Validate the exact frames before opening the audio/PTT path. This keeps
-	// UI macros, source packing, and physical transmission on the same canonical
-	// message and catches an encoder regression before RF is keyed.
-	decoded, _, final, valid := jtty.UnpackMessage(frames)
-	if !valid || !final || decoded != canonical {
-		a.emitRaw("tx:error", map[string]any{"error": "JTTY 编码校验失败", "canonical": canonical, "decoded": decoded})
+	if len(frames) == 0 {
 		return
 	}
 	message = canonical
@@ -3059,36 +2821,33 @@ func (a *App) transmitJTTY(macroID, message string) {
 	}()
 	defer close(progressDone)
 	a.emitTXProgress(id, macroID, message, 0, len(frames), 0, totalDuration)
-	for frameIndex, pf := range frames {
-		a.emitTXProgress(id, macroID, message, frameIndex, len(frames), time.Since(progressStart).Seconds(), totalDuration)
+	// Submit one continuous waveform so audio draining and envelope ramps do
+	// not introduce gaps between non-final segments or individual frames.
+	tones := make([]int, 0, len(frames)*59)
+	for _, pf := range frames {
+		if ctx.Err() != nil {
+			return
+		}
 		bits := [jtty.PayloadBits]int{}
-		for i := 0; i < jtty.PayloadBits; i++ {
+		for i := range bits {
 			if pf.Bits&(uint64(1)<<uint(jtty.PayloadBits-1-i)) != 0 {
 				bits[i] = 1
 			}
 		}
-		tones := jtty.EncodeFrame(bits)
-		waveLen := len(tones) * 384
-		if cap(a.txWaveScratch) < waveLen {
-			a.txWaveScratch = make([]float32, waveLen)
-		}
-		if cap(a.txDphiScratch) < (len(tones)+2)*384 {
-			a.txDphiScratch = make([]float64, (len(tones)+2)*384)
-		}
-		if cap(a.txPulseScratch) < 3*384 {
-			a.txPulseScratch = make([]float64, 3*384)
-		}
-		wave := a.txWaveScratch[:waveLen]
-		jtty.GenerateJTTYWaveformInto(wave, a.txDphiScratch, a.txPulseScratch, tones[:], 384, 2.0, 12000, txHz)
-		if err := out.Play(ctx, wave, 12000); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			a.emitRaw("tx:error", map[string]any{"error": err.Error()})
-			return
-		}
-		a.emitTXProgress(id, macroID, message, frameIndex+1, len(frames), frameDuration*float64(frameIndex+1), totalDuration)
+		encoded := jtty.EncodeFrame(bits)
+		tones = append(tones, encoded[:]...)
 	}
+	wave := jtty.GenerateJTTYWaveform(tones, 384, 2.0, 12000, txHz)
+	if ctx.Err() != nil {
+		return
+	}
+	if err := out.Play(ctx, wave, 12000); err != nil {
+		if ctx.Err() == nil {
+			a.emitRaw("tx:error", map[string]any{"error": err.Error()})
+		}
+		return
+	}
+
 	a.emitTXProgress(id, macroID, message, len(frames), len(frames), totalDuration, totalDuration)
 	completed = true
 }
@@ -3384,12 +3143,15 @@ func bandDialFrequencyFromSettings(s model.Settings, band string) (int64, bool) 
 }
 
 func radioControlMode(backend, pttMethod string) string {
+	if backend == "hamlib-local" {
+		return "Hamlib / " + pttMethod
+	}
 	method := strings.ToUpper(strings.TrimSpace(pttMethod))
 	if method == "CAT" {
 		method = "RIGCTL"
 	}
 	if strings.EqualFold(strings.TrimSpace(backend), "rigctld-net") {
-		return "RIGCTLD NET / " + method
+		return "NET rigctl / " + method
 	}
 	if method == "VOX" || method == "" {
 		return "VOX / AUDIO"
@@ -3436,14 +3198,11 @@ func (a *App) SetDialFrequency(hz int64) error {
 	split := a.settings.Radio.SplitMode
 	a.settingsMu.RUnlock()
 	if split == "Rig" {
-		if sr, ok := r.(interface {
-			SetSplit(context.Context, string) error
-			SetSplitFrequency(context.Context, int64) error
-		}); ok {
-			_ = sr.SetSplit(context.Background(), "VFOB")
-			_ = sr.SetSplitFrequency(context.Background(), hz)
+		if err := configureSplit(context.Background(), r, true, hz); err != nil {
+			return fmt.Errorf("Split: %w", err)
 		}
 	}
+
 	a.settingsMu.RLock()
 	backend := a.settings.Radio.Backend
 	pttMethod := a.settings.Radio.PTTMethod

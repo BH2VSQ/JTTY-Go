@@ -27,13 +27,14 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw 'npm not found.'
 }
 
-# NET rigctl connects to an externally managed rigctld server. No local Hamlib files are required.
+# Local Hamlib is shipped as one pinned, verified runtime. NET servers stay external.
 
 if (-not $SkipTests) {
     Push-Location $ProjectRoot
     try {
         Write-Host '[1/5] Running tests...' -ForegroundColor Yellow
         go test ./internal/... ./tests/...
+        if ($LASTEXITCODE -ne 0) { throw 'Core tests failed' }
     }
     finally { Pop-Location }
 }
@@ -41,8 +42,12 @@ if (-not $SkipTests) {
 Write-Host '[2/5] Installing frontend dependencies...' -ForegroundColor Yellow
 Push-Location (Join-Path $ProjectRoot 'frontend')
 try {
-    npm install
+    npm ci
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed' }
+    npx tsc --noEmit
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend type check failed' }
     npm run build
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed' }
 }
 finally { Pop-Location }
 
@@ -68,17 +73,14 @@ Write-Host ("Executable size: {0:N2} MB" -f ((Get-Item $exe).Length / 1MB))
 $releaseDir = Join-Path $ProjectRoot 'dist\windows'
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 $portableDir = Join-Path $releaseDir 'JTTY-Go-portable'
+if (-not ([IO.Path]::GetFullPath($portableDir)).StartsWith(([IO.Path]::GetFullPath($releaseDir) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) { throw 'Portable cleanup escaped release directory' }
 if (Test-Path $portableDir) { Remove-Item -Recurse -Force $portableDir }
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 Copy-Item $exe (Join-Path $portableDir 'JTTY-Go.exe')
+& (Join-Path $PSScriptRoot 'stage-hamlib.ps1') -Destination (Join-Path $portableDir 'hamlib')
+& (Join-Path $PSScriptRoot 'stage-hamlib.ps1') -Destination (Join-Path $BuildBin 'hamlib')
 Copy-Item (Join-Path $ProjectRoot 'LICENSE') (Join-Path $portableDir 'LICENSE.txt')
-if (Test-Path (Join-Path $ProjectRoot 'licenses\WSJT-X-GPL-3.0.txt')) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $portableDir 'licenses') | Out-Null
-    Copy-Item (Join-Path $ProjectRoot 'licenses\WSJT-X-GPL-3.0.txt') (Join-Path $portableDir 'licenses\WSJT-X-GPL-3.0.txt')
-}
-if (Test-Path (Join-Path $ProjectRoot 'licenses\JTTY-PORT-NOTICE.md')) {
-    Copy-Item (Join-Path $ProjectRoot 'licenses\JTTY-PORT-NOTICE.md') (Join-Path $portableDir 'licenses\JTTY-PORT-NOTICE.md')
-}
+Copy-Item -LiteralPath (Join-Path $ProjectRoot 'licenses') -Destination $portableDir -Recurse
 
 $portableZip = Join-Path $releaseDir 'JTTY-Go-portable-windows.zip'
 if (Test-Path $portableZip) { Remove-Item -Force $portableZip }
@@ -181,9 +183,10 @@ else {
     Write-Host '[5/5] Installer step skipped by parameter.' -ForegroundColor DarkYellow
 }
 
-Get-ChildItem $releaseDir -File | ForEach-Object {
+$sumLines = Get-ChildItem $releaseDir -Recurse -File | Where-Object { $_.Extension -in '.zip', '.exe' } | ForEach-Object {
     $hash = Get-FileHash $_.FullName -Algorithm SHA256
-    "$($hash.Hash)  $($_.Name)" | Add-Content -Path (Join-Path $releaseDir 'SHA256SUMS.txt') -Encoding utf8
+    "$($hash.Hash.ToLowerInvariant())  $($_.FullName.Substring($releaseDir.Length + 1))"
 }
+[IO.File]::WriteAllLines((Join-Path $releaseDir 'SHA256SUMS.txt'), [string[]]$sumLines, [Text.UTF8Encoding]::new($false))
 
 Write-Host "Packaging complete: $releaseDir" -ForegroundColor Green

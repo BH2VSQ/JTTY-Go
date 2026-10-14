@@ -142,6 +142,9 @@ func (s *JTTYStream) Close() {
 		close(s.stop)
 	}
 	s.wg.Wait()
+	s.mu.Lock()
+	s.emitAssemblyUpdates(s.assembler.EndReception(), s.startUTC)
+	s.mu.Unlock()
 }
 
 func (s *JTTYStream) SetCenterFrequency(hz float64) {
@@ -181,6 +184,7 @@ func (s *JTTYStream) Reset() {
 	s.nextStart = 0
 	s.startUTC = time.Time{}
 	s.seq = 0
+	s.emitAssemblyUpdates(s.assembler.EndReception(), s.startUTC)
 	s.assembler.Reset()
 	clear(s.history)
 	s.historySeq = s.historySeq[:0]
@@ -515,7 +519,7 @@ func (s *JTTYStream) consume(result jttyWindowResult) {
 	defer s.mu.Unlock()
 	forward := float64(result.startSample) / JTTYAudioRate
 	if !result.retro {
-		s.assembler.Prune(forward, framePeriod)
+		s.emitAssemblyUpdates(s.assembler.Prune(forward, framePeriod), result.startUTC.Add(-time.Duration(forward*float64(time.Second))))
 	}
 	for _, hit := range result.frames {
 		message := hit.Message
@@ -535,7 +539,7 @@ func (s *JTTYStream) consume(result jttyWindowResult) {
 			item := model.DecodeMessage{
 				SignalUTC:     result.startUTC.Add(time.Duration((update.StartXDT - forward) * float64(time.Second))),
 				ReceivedUTC:   time.Now().UTC(),
-				SNR:           message.SNR,
+				SNR:           int(math.Round(update.SNRDB)),
 				DT:            message.DT,
 				FrequencyHz:   int(update.FrequencyHz + 0.5),
 				Message:       update.Text,
@@ -543,8 +547,9 @@ func (s *JTTYStream) consume(result jttyWindowResult) {
 				Confidence:    message.Confidence,
 				JTTYMessageID: update.MessageID,
 				JTTYLastFrame: update.Complete,
+				JTTYTerminal:  update.Terminal,
 			}
-			if s.sink != nil {
+			if s.sink != nil && item.Message != "" {
 				s.sink.OnDecodeMessage(item)
 			}
 		}
@@ -647,4 +652,16 @@ func resampleLinear12(in []float32, from, to int) []float32 {
 		}
 	}
 	return out
+}
+
+func (s *JTTYStream) emitAssemblyUpdates(updates []jtty.MessageUpdate, origin time.Time) {
+	if s.sink == nil {
+		return
+	}
+	for _, u := range updates {
+		if u.Text == "" {
+			continue
+		}
+		s.sink.OnDecodeMessage(model.DecodeMessage{SignalUTC: origin.Add(time.Duration(u.StartXDT * float64(time.Second))), ReceivedUTC: time.Now().UTC(), SNR: int(math.Round(u.SNRDB)), FrequencyHz: int(math.Round(u.FrequencyHz)), Message: u.Text, Callsigns: jtty.ExtractCallsigns(u.Text), JTTYMessageID: u.MessageID, JTTYTerminal: u.Terminal})
+	}
 }

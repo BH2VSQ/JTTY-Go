@@ -1,6 +1,7 @@
 package jtty
 
 import (
+	"regexp"
 	"strings"
 	"sync/atomic"
 )
@@ -37,6 +38,8 @@ type MessageUpdate struct {
 	StartXDT    float64
 	Text        string
 	Complete    bool
+	Terminal    string
+	SNRDB       float64
 }
 
 type messageAssembly struct {
@@ -48,6 +51,7 @@ type messageAssembly struct {
 	TrailingSep bool
 	LastFrame   bool
 	FrameCount  int
+	StartSNRDB  float64
 }
 
 type recentFrame struct {
@@ -73,6 +77,7 @@ func NewMessageAssembler() *MessageAssembler {
 }
 
 func (a *MessageAssembler) Reset() {
+	a.EndReception()
 	a.active = a.active[:0]
 	a.recent = a.recent[:0]
 }
@@ -122,6 +127,8 @@ func (a *MessageAssembler) Add(frame FrameDecode, framePeriod float64) ([]Messag
 			StartXDT:    msg.StartXDT,
 			Text:        displayMessageText(msg.Decoded),
 			Complete:    frame.LastFrame,
+			Terminal:    terminalFor(frame.LastFrame),
+			SNRDB:       msg.StartSNRDB,
 		}}, true
 	}
 
@@ -134,11 +141,12 @@ func (a *MessageAssembler) Add(frame FrameDecode, framePeriod float64) ([]Messag
 		TrailingSep: frame.TrailingSep,
 		LastFrame:   frame.LastFrame,
 		FrameCount:  1,
+		StartSNRDB:  frame.SNRDB,
 	}
 	if strings.HasPrefix(msg.Decoded, "599 ") {
 		msg.Decoded = "~" + msg.Decoded
 	}
-	update := MessageUpdate{MessageID: msg.ID, FrequencyHz: msg.FrequencyHz, StartXDT: msg.StartXDT, Text: displayMessageText(msg.Decoded), Complete: frame.LastFrame}
+	update := MessageUpdate{MessageID: msg.ID, FrequencyHz: msg.FrequencyHz, StartXDT: msg.StartXDT, Text: displayMessageText(msg.Decoded), Complete: frame.LastFrame, Terminal: terminalFor(frame.LastFrame), SNRDB: msg.StartSNRDB}
 	if !frame.LastFrame && len(a.active) < MaxActiveMessages {
 		a.active = append(a.active, msg)
 	}
@@ -162,9 +170,7 @@ func (a *MessageAssembler) append(index int, frame FrameDecode, gap int) *messag
 	} else {
 		m.Decoded = cur + incoming
 	}
-	if len(m.Decoded) > 80 {
-		m.Decoded = m.Decoded[:80]
-	}
+
 	m.TrailingSep = frame.TrailingSep
 	m.FrequencyHz = frame.FrequencyHz
 	m.SyncXDT = frame.XDT
@@ -186,7 +192,8 @@ func (a *MessageAssembler) remember(frame FrameDecode) {
 	a.recent = append(a.recent, recentFrame{FrequencyHz: frame.FrequencyHz, SyncXDT: frame.XDT})
 }
 
-func (a *MessageAssembler) Prune(forwardXDT, framePeriod float64) {
+func (a *MessageAssembler) Prune(forwardXDT, framePeriod float64) []MessageUpdate {
+	var updates []MessageUpdate
 	oldest := forwardXDT - float64(MaxRetroSteps)*framePeriod/4.0
 	keep := a.recent[:0]
 	for _, r := range a.recent {
@@ -197,12 +204,14 @@ func (a *MessageAssembler) Prune(forwardXDT, framePeriod float64) {
 	a.recent = keep
 	for i := 0; i < len(a.active); {
 		if oldest-a.active[i].SyncXDT > float64(MaxContinuationGap)*framePeriod+ContinuationTimeTolerance {
+			updates = append(updates, assemblyUpdate(a.active[i], "expired"))
 			a.active[i] = a.active[len(a.active)-1]
 			a.active = a.active[:len(a.active)-1]
 			continue
 		}
 		i++
 	}
+	return updates
 }
 
 func sameRecentFrame(frame FrameDecode, r recentFrame) bool {
@@ -234,7 +243,7 @@ func displayMessageText(s string) string {
 		}
 	}
 	s = strings.ReplaceAll(s, "~", " ")
-	return strings.TrimSpace(s)
+	return strings.TrimSpace(fillerRuns.ReplaceAllString(s, " "))
 }
 
 func abs(v float64) float64 {
@@ -252,3 +261,23 @@ func round(v float64) float64 {
 }
 
 func (a *MessageAssembler) ActiveCount() int { return len(a.active) }
+
+var fillerRuns = regexp.MustCompile(`\s*(?:<{5}\s*)+`)
+
+func terminalFor(final bool) string {
+	if final {
+		return "complete"
+	}
+	return "growing"
+}
+func assemblyUpdate(m messageAssembly, terminal string) MessageUpdate {
+	return MessageUpdate{MessageID: m.ID, FrequencyHz: m.FrequencyHz, StartXDT: m.StartXDT, Text: displayMessageText(m.Decoded), Terminal: terminal, SNRDB: m.StartSNRDB}
+}
+func (a *MessageAssembler) EndReception() []MessageUpdate {
+	updates := make([]MessageUpdate, 0, len(a.active))
+	for _, m := range a.active {
+		updates = append(updates, assemblyUpdate(m, "reception-ended"))
+	}
+	a.active = a.active[:0]
+	return updates
+}

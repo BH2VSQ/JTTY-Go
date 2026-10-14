@@ -74,8 +74,8 @@ Mode list: USB LSB CW PKTUSB
 	if !got.HasCATPTT {
 		t.Fatal("CAT PTT should be enabled for RIG_PTT_RIG + set_ptt")
 	}
-	if !got.HasCATPTTMicData {
-		t.Fatal("CAT audio-source capability should follow CAT PTT when Hamlib exposes no separate mic/data field")
+	if got.HasCATPTTMicData {
+		t.Fatal("ordinary CAT PTT must not imply mic/data selection")
 	}
 	if !got.Asynchronous {
 		t.Fatal("RIG_TRN_RIG should mark CAT asynchronous")

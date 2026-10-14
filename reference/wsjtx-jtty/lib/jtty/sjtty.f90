@@ -21,6 +21,7 @@ program sjtty
   character*80 umsg                 !User-formatted message
   character(len=80) :: profile_option
   integer :: exchange_profile,arg_offset
+  integer :: ihr,imin,isec,ihhmmss     !For clock-like (not raw sequential) output filenames
   character*40 fname                !Output file name
   character*34 c32(16)
   complex, allocatable :: cwave(:)  !Complex generated waveform (12000 Hz)
@@ -238,7 +239,12 @@ program sjtty
      iwave(1:iz)=nint(wave(1:iz))
 !     call jtty_spec(iwave,iz)
      h=default_header(12000,iz)
-     write(fname,1102) ifile
+     ! Format the file counter as elapsed HHMMSS, not a raw sequential integer, so WSJT-X's disk-playback time label parses it (file 60 -> "_000100", not the invalid "_000060").
+     ihr=mod(ifile/3600,24)
+     imin=mod(ifile,3600)/60
+     isec=mod(ifile,60)
+     ihhmmss=10000*ihr + 100*imin + isec
+     write(fname,1102) ihhmmss
 1102 format('000000_',i6.6,'.wav')
      open(10,file=fname,status='replace',access='stream')
      write(10) h,iwave(1:iz)                !Save to *.wav file

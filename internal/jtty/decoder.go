@@ -14,7 +14,7 @@ import (
 
 var ErrInvalidWaveform = errors.New("invalid JTTY decode waveform")
 
-// Decoder implements the JTTY PHY path using the WSJT-X 3.2.0-rc1 algorithmic
+// Decoder implements the JTTY PHY path using the pinned WSJT-X algorithmic
 // reference: analytic 12 kHz -> 6 kHz conversion, sync search, payload tone
 // correlations, TBCC/WAVA+CRC, and source-grammar validation.
 type Decoder struct {
@@ -45,7 +45,7 @@ func (d *Decoder) FrequencyTolerance() float64 {
 	return d.FTol
 }
 
-// SetMinSNR updates the final sync/SNR acceptance floor at runtime.
+// SetMinSNR updates the acquisition sync-ratio gate, not the reported 2500 Hz SNR.
 func (d *Decoder) SetMinSNR(snr float64) {
 	if snr < -30 {
 		snr = -30
@@ -463,8 +463,40 @@ func (d *Decoder) tryCandidate(ctx context.Context, samples []complex128, job de
 		return zero, false
 	}
 	msg = displayJTTYText(msg)
-	message := decomposeDecodeMessage(msg, job, f1, xdt, snrDB, eom)
-	return candidateHit{message: message, payload: payload, tones: EncodeFrame(payload), f1: f1, xdt: xdt}, true
+	tones := EncodeFrame(payload)
+	reportedSNR := decodedFrameSNR(baseband, xdt, tones)
+	message := decomposeDecodeMessage(msg, job, f1, xdt, reportedSNR, eom)
+	return candidateHit{message: message, payload: payload, tones: tones, f1: f1, xdt: xdt}, true
+}
+
+// The sync ratio above remains the acquisition gate. After CRC validation,
+// WSJT-X estimates SNR from all decoded tones in a 2500 Hz reference bandwidth.
+func decodedFrameSNR(baseband []complex128, xdt float64, tones [59]int) float64 {
+	refs := cachedReference(nSS)
+	start := int(math.Round(xdt * fs6k))
+	pt, pa := 0.0, 0.0
+	for j, tone := range tones {
+		first := start + j*nSS
+		if first < 0 || first+nSS > len(baseband) {
+			continue
+		}
+		for t := 0; t < 4; t++ {
+			var z complex128
+			for i := 0; i < nSS; i++ {
+				z += cmplx.Conj(refs[t][i]) * baseband[first+i]
+			}
+			power := real(z)*real(z) + imag(z)*imag(z)
+			pa += power
+			if t == tone {
+				pt += power
+			}
+		}
+	}
+	pn := (pa - pt) / 3
+	if pn <= 0 || pt <= pn {
+		return -17
+	}
+	return math.Max(10*math.Log10((pt-pn)/pn)-10*math.Log10(2500/31.25), -17)
 }
 
 func nearAcceptedPrimary(list []acceptedFrame, freqHz, xdt float64) bool {

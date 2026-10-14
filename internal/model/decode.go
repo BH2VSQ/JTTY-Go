@@ -18,6 +18,7 @@ type DecodeMessage struct {
 	// JTTYMessageID keeps the WSJT-X-style live message identity across frame
 	// updates. The PHY details below are internal to the Go assembler and are
 	// deliberately not part of the JSON/UI contract.
+	JTTYTerminal  string `json:"jttyTerminal,omitempty"`
 	JTTYMessageID uint64 `json:"jttyMessageId,omitempty"`
 	JTTYLastFrame bool   `json:"-"`
 	JTTYTrailing  bool   `json:"-"`

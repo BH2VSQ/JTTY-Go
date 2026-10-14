@@ -336,9 +336,9 @@ func TestSelectedRadioPreservesVOXPTTMethod(t *testing.T) {
 	s.Audio.RecordDirectory = `C:\JTTY-Go\record`
 	out, changed := normalizeLoadedSettings(s, `C:\JTTY-Go\record`)
 	if !changed {
-		t.Fatal("legacy local-Hamlib settings should be marked for NET migration")
+		t.Fatal("legacy local-Hamlib settings should be marked for local backend migration")
 	}
-	if out.Radio.Backend != "rigctld-net" || out.Radio.RigModelID != 1020 || out.Radio.PTTMethod != "VOX" {
+	if out.Radio.Backend != "hamlib-local" || out.Radio.RigModelID != 1020 || out.Radio.PTTMethod != "VOX" {
 		t.Fatalf("selected radio migration changed unexpected fields: %+v", out.Radio)
 	}
 }

@@ -3,11 +3,13 @@ package radio
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,16 +20,20 @@ type RigctldConfig struct {
 	Port       int
 	Mode       string
 	PassbandHz int
+	PTTValue   int
 }
 
 type RigctldRadio struct {
-	mu        sync.Mutex
-	conn      net.Conn
-	reader    *bufio.Reader
-	pttConn   net.Conn
-	pttReader *bufio.Reader
-	cfg       RigctldConfig
-	lastPTT   bool
+	mu         sync.Mutex
+	pttMu      sync.Mutex
+	connected  atomic.Bool
+	pttUnknown bool
+	conn       net.Conn
+	reader     *bufio.Reader
+	pttConn    net.Conn
+	pttReader  *bufio.Reader
+	cfg        RigctldConfig
+	lastPTT    bool
 }
 
 func NewRigctld(cfg RigctldConfig) *RigctldRadio {
@@ -40,8 +46,8 @@ func NewRigctld(cfg RigctldConfig) *RigctldRadio {
 	if cfg.Mode == "" {
 		cfg.Mode = "PKTUSB"
 	}
-	if cfg.PassbandHz <= 0 {
-		cfg.PassbandHz = 3000
+	if cfg.PassbandHz < 0 {
+		cfg.PassbandHz = 0
 	}
 	return &RigctldRadio{cfg: cfg}
 }
@@ -59,37 +65,61 @@ func (r *RigctldRadio) Open(ctx context.Context) error {
 	}
 	r.conn = conn
 	r.reader = bufio.NewReader(conn)
+	r.connected.Store(true)
 	return nil
 }
 
 func (r *RigctldRadio) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var firstErr error
+	r.pttMu.Lock()
+	needsRelease := r.pttUnknown
+	r.pttMu.Unlock()
+	var recoveryErr error
+	if needsRelease {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		recoveryErr = r.PTT(ctx, false)
+		cancel()
+	}
+	r.connected.Store(false)
+	r.pttMu.Lock()
+	err := recoveryErr
 	if r.pttConn != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, firstErr = rigctldPTTCommand(ctx, r.pttConn, r.pttReader, 0)
+		_, err = rigctldPTTCommand(ctx, r.pttConn, r.pttReader, 0)
 		cancel()
-		if err := r.pttConn.Close(); firstErr == nil && err != nil {
-			firstErr = fmt.Errorf("close rigctld PTT session: %w", err)
-		}
+		_ = r.pttConn.Close()
 		r.pttConn = nil
 		r.pttReader = nil
-		r.lastPTT = false
-	}
-	if r.conn != nil {
-		if err := r.conn.Close(); firstErr == nil && err != nil {
-			firstErr = err
+		r.pttUnknown = err != nil
+		if err == nil {
+			r.lastPTT = false
 		}
-		r.conn = nil
-		r.reader = nil
 	}
-	return firstErr
-}
-
-func (r *RigctldRadio) command(ctx context.Context, cmd string) ([]string, error) {
+	r.pttMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.conn != nil {
+		closeErr := r.conn.Close()
+		r.conn = nil
+		r.reader = nil
+		err = errors.Join(err, closeErr)
+	}
+	return err
+}
+
+func (r *RigctldRadio) command(ctx context.Context, cmd string) (values []string, resultErr error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	defer func() {
+		if resultErr != nil {
+			var remote *HamlibError
+			if !errors.As(resultErr, &remote) && r.conn != nil {
+				_ = r.conn.Close()
+				r.conn = nil
+				r.reader = nil
+				r.connected.Store(false)
+			}
+		}
+	}()
 	if r.conn == nil {
 		return nil, fmt.Errorf("rigctld is not connected")
 	}
@@ -118,14 +148,18 @@ func (r *RigctldRadio) command(ctx context.Context, cmd string) ([]string, error
 	// Default rigctld protocol returns getter values without an RPRT success line.
 	// Do not wait for RPRT after a successful GET, or the read will time out.
 	verb := fields[0]
+	extended := strings.HasPrefix(verb, "+")
 	valueLines := 0
 	switch verb {
-	case "f", "t", "i", "l":
+	case "f", "t", "i", "l", "v":
 		valueLines = 1
-	case "m":
+	case "m", "s":
 		valueLines = 2 // Mode and passband, each on its own line.
 	}
 
+	if extended {
+		valueLines = -1
+	}
 	if _, err := r.conn.Write([]byte(command + "\n")); err != nil {
 		return nil, fmt.Errorf("rigctld write: %w", err)
 	}
@@ -149,11 +183,25 @@ func (r *RigctldRadio) command(ctx context.Context, cmd string) ([]string, error
 			return fmt.Errorf("invalid rigctld response %q: %w", line, err)
 		}
 		if code != 0 {
-			return fmt.Errorf("rigctld error %s", line)
+			return &HamlibError{Code: code}
 		}
 		return nil
 	}
 
+	if extended {
+		var lines []string
+		for len(lines) < 2048 {
+			line, err := readLine()
+			if err != nil {
+				return nil, err
+			}
+			if strings.HasPrefix(line, "RPRT ") {
+				return lines, parseRPRT(line)
+			}
+			lines = append(lines, line)
+		}
+		return nil, fmt.Errorf("rigctld response exceeds line limit")
+	}
 	first, err := readLine()
 	if err != nil {
 		return nil, err
@@ -228,7 +276,7 @@ func parseSupportedLevels(lines []string) map[string]bool {
 
 // SupportedLevels queries the Hamlib get_level capability list.
 func (r *RigctldRadio) SupportedLevels(ctx context.Context) (map[string]bool, error) {
-	lines, err := r.command(ctx, "l ?")
+	lines, err := r.command(ctx, "+l ?")
 	if err != nil {
 		return nil, err
 	}
@@ -282,74 +330,64 @@ func (r *RigctldRadio) SetMode(ctx context.Context, mode string) error {
 	if mode == "" {
 		mode = r.cfg.Mode
 	}
+	if strings.ContainsAny(mode, " \r\n\t") {
+		return fmt.Errorf("invalid mode token")
+	}
 	_, err := r.command(ctx, fmt.Sprintf("M %s %d", mode, r.cfg.PassbandHz))
 	return err
 }
 
 func (r *RigctldRadio) PTT(ctx context.Context, on bool) error {
+	r.pttMu.Lock()
+	defer r.pttMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.conn == nil {
-		return fmt.Errorf("rigctld is not connected")
+	if on && (!r.connected.Load() || r.pttUnknown) {
+		return fmt.Errorf("PTT 状态未知或连接已断开，请重新连接并确认停止发射")
 	}
-
-	if on {
-		if r.pttConn != nil {
-			// An active PTT session must not be recreated or have its safety
-			// timeout implicitly extended by a duplicate ON command.
-			return nil
-		}
-		dialer := net.Dialer{Timeout: 3 * time.Second}
-		conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(r.cfg.Address, strconv.Itoa(r.cfg.Port)))
+	if on && r.lastPTT {
+		return nil
+	}
+	if r.pttConn == nil {
+		d := net.Dialer{Timeout: 2 * time.Second}
+		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(r.cfg.Address, strconv.Itoa(r.cfg.Port)))
 		if err != nil {
-			return fmt.Errorf("connect rigctld PTT session: %w", err)
-		}
-		reader := bufio.NewReader(conn)
-		response, err := rigctldPTTCommand(ctx, conn, reader, 1)
-		if err != nil {
-			_ = conn.Close()
-			return fmt.Errorf("rigctld PTT-on failed (response %q): %w", response, err)
+			return err
 		}
 		r.pttConn = conn
-		r.pttReader = reader
-		r.lastPTT = true
-		return nil
+		r.pttReader = bufio.NewReader(conn)
 	}
-
-	if r.pttConn != nil {
-		// PTT-OFF uses exactly the same TCP session as PTT-ON. A number of
-		// rigctld backends release keying when that session is closed.
-		response, err := rigctldPTTCommand(ctx, r.pttConn, r.pttReader, 0)
-		closeErr := r.pttConn.Close()
+	value := 0
+	if on {
+		value = r.cfg.PTTValue
+		if value < 1 || value > 3 {
+			value = 1
+		}
+	}
+	_, err := rigctldPTTCommand(ctx, r.pttConn, r.pttReader, value)
+	if err != nil {
+		// A failed ON may already have reached the radio. Attempt OFF on the
+		// same session, but never declare its outcome known after framing loss.
+		release, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_, _ = rigctldPTTCommand(release, r.pttConn, r.pttReader, 0)
+		cancel()
+		_ = r.pttConn.Close()
 		r.pttConn = nil
 		r.pttReader = nil
-		r.lastPTT = false
-		if err != nil {
-			return fmt.Errorf("rigctld PTT-off failed (response %q): %w", response, err)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close rigctld PTT session: %w", closeErr)
-		}
-		return nil
+		r.pttUnknown = true
+		return err
 	}
-
-	// A safe OFF command is still sent if the radio was not keyed through this
-	// instance, for example during initial connection or after recovery.
-	r.mu.Unlock()
-	_, err := r.command(ctx, "T 0")
-	r.mu.Lock()
-	if err == nil {
-		r.lastPTT = false
+	r.lastPTT = on
+	r.pttUnknown = false
+	if !on {
+		_ = r.pttConn.Close()
+		r.pttConn = nil
+		r.pttReader = nil
 	}
-	return err
+	return nil
 }
 
-// rigctldPTTCommand is the small, line-oriented PTTSession protocol used by
-// SATAprs-Go. The connection is kept open by the caller after T 1 and reused
-// for T 0. Other radio status queries must not use this PTT socket.
 func rigctldPTTCommand(ctx context.Context, conn net.Conn, reader *bufio.Reader, value int) (string, error) {
 	if value < 0 || value > 3 {
 		return "", fmt.Errorf("invalid rigctld PTT value %d", value)
@@ -378,6 +416,9 @@ func rigctldPTTCommand(ctx context.Context, conn net.Conn, reader *bufio.Reader,
 		return "", fmt.Errorf("read rigctld PTT response: %w", err)
 	}
 	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "RPRT ") || len(strings.Fields(line)) != 2 {
+		return line, fmt.Errorf("invalid rigctld PTT response %q", line)
+	}
 	if strings.HasPrefix(line, "RPRT ") {
 		code, parseErr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "RPRT ")))
 		if parseErr != nil {
@@ -391,14 +432,14 @@ func rigctldPTTCommand(ctx context.Context, conn net.Conn, reader *bufio.Reader,
 }
 
 func (r *RigctldRadio) Transmitting() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.pttMu.Lock()
+	defer r.pttMu.Unlock()
 	return r.lastPTT
 }
 
 func (r *RigctldRadio) SetSplit(ctx context.Context, txVFO string) error {
 	if txVFO == "" {
-		txVFO = "VFOB"
+		return fmt.Errorf("TX VFO must be selected from radio capabilities")
 	}
 	_, err := r.command(ctx, fmt.Sprintf("S 1 %s", txVFO))
 	return err
@@ -420,4 +461,46 @@ func (r *RigctldRadio) SplitFrequency(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("invalid split frequency %q", v)
 	}
 	return int64(f + 0.5), nil
+}
+
+type HamlibError struct{ Code int }
+
+func (e *HamlibError) Error() string      { return fmt.Sprintf("Hamlib RPRT %d", e.Code) }
+func (r *RigctldRadio) PTTKnown() bool    { r.pttMu.Lock(); defer r.pttMu.Unlock(); return !r.pttUnknown }
+func (r *RigctldRadio) SetPTTValue(v int) { r.pttMu.Lock(); defer r.pttMu.Unlock(); r.cfg.PTTValue = v }
+func (r *RigctldRadio) Capabilities(ctx context.Context) (HamlibCapabilities, error) {
+	lines, err := r.command(ctx, "+\\dump_caps")
+	if err != nil {
+		return HamlibCapabilities{}, err
+	}
+	return ParseHamlibCapabilities(strings.Join(lines, "\n"), 0), nil
+}
+func (r *RigctldRadio) Split(ctx context.Context) (bool, string, error) {
+	lines, err := r.command(ctx, "s")
+	if err != nil {
+		return false, "", err
+	}
+	if len(lines) != 2 {
+		return false, "", fmt.Errorf("invalid split response")
+	}
+	if lines[0] != "0" && lines[0] != "1" {
+		return false, "", fmt.Errorf("invalid split flag")
+	}
+	return lines[0] == "1", lines[1], nil
+}
+
+func (r *RigctldRadio) CurrentVFO(ctx context.Context) (string, error) {
+	lines, err := r.command(ctx, "v")
+	return firstValue(lines), err
+}
+func (r *RigctldRadio) SetSplitEnabled(ctx context.Context, on bool, vfo string) error {
+	if strings.ContainsAny(vfo, " \r\n\t") || vfo == "" {
+		return fmt.Errorf("invalid TX VFO")
+	}
+	value := 0
+	if on {
+		value = 1
+	}
+	_, err := r.command(ctx, fmt.Sprintf("S %d %s", value, vfo))
+	return err
 }
