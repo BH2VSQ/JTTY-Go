@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestDefaultFrequencyBands(t *testing.T) {
 	want := []struct {
@@ -45,5 +48,21 @@ func TestDefaultSettingsPersistedStateDefaults(t *testing.T) {
 	}
 	if s.Layout.WindowWidth != 1360 || s.Layout.WindowHeight != 820 {
 		t.Fatalf("unexpected default window size: %dx%d", s.Layout.WindowWidth, s.Layout.WindowHeight)
+	}
+}
+
+func TestDuplexModeSettingsRoundTrip(t *testing.T) {
+	settings := DefaultSettings()
+	settings.DuplexMode = true
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	var loaded Settings
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	if !loaded.DuplexMode {
+		t.Fatal("duplex mode was not persisted by JSON")
 	}
 }

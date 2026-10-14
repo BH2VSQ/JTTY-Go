@@ -30,7 +30,7 @@ RestartApplications=no
 ChangesAssociations=no
 
 [Files]
-; JTTY-Go.exe contains the frontend and embedded Hamlib runtime.
+; JTTY-Go.exe contains the frontend. NET rigctl connects to an external rigctld service.
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 Source: "..\licenses\WSJT-X-GPL-3.0.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\licenses\JTTY-PORT-NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion

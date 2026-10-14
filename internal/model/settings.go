@@ -15,6 +15,7 @@ type AudioSettings struct {
 
 type RadioSettings struct {
 	Backend         string `json:"backend"`
+	Enabled         bool   `json:"enabled"`
 	RigName         string `json:"rigName"`
 	RigModelID      int    `json:"rigModelId"`
 	RigctldPath     string `json:"rigctldPath"`
@@ -96,6 +97,7 @@ type Settings struct {
 	DecodeLogEnabled     bool   `json:"decodeLogEnabled"`
 	RecordEnabled        bool   `json:"recordEnabled"`
 	DecodeWindowLimit    int    `json:"decodeWindowLimit"`
+	DuplexMode           bool   `json:"duplexMode"`
 	AutoFollowTail       bool   `json:"autoFollowTail"`
 	AutoStartMonitor     bool   `json:"autoStartMonitor"`
 	ExchangeSerialNumber int    `json:"exchangeSerialNumber"`

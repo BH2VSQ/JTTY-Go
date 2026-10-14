@@ -54,6 +54,7 @@ type App struct {
 	sink                 EventSink
 	bus                  *eventbus.Bus
 	settingsMu           sync.RWMutex
+	settingsSaveMu       sync.Mutex
 	frequencyMu          sync.RWMutex
 	radioMu              sync.Mutex
 	meterMu              sync.Mutex
@@ -73,6 +74,12 @@ type App struct {
 	radio                radio.Radio
 	rigctldCmd           *exec.Cmd
 	radioTestMu          sync.Mutex
+	pttTestMu            sync.Mutex
+	pttTestTimer         *time.Timer
+	pttTestConfig        model.RadioSettings
+	pttTestGeneration    uint64
+	pttTestActive        bool
+	pttTestTimedOut      bool
 	testRadio            radio.Radio
 	testRigctldCmd       *exec.Cmd
 	testRadioCfg         model.RadioSettings
@@ -134,6 +141,20 @@ func New() *App {
 		a.triggerAndTransmitMacro(b.ID)
 	})
 	return a
+}
+
+func (a *App) persistSettingsFile(path string, settings model.Settings) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	// Serialize writes and always take the latest duplex flag from the live
+	// settings snapshot. A delayed save from another UI action must not undo it.
+	a.settingsSaveMu.Lock()
+	defer a.settingsSaveMu.Unlock()
+	a.settingsMu.RLock()
+	settings.DuplexMode = a.settings.DuplexMode
+	a.settingsMu.RUnlock()
+	return storage.SaveSettings(path, settings)
 }
 
 // SetEmbeddedAssets provides the Wails application with embedded resources
@@ -243,6 +264,13 @@ func (a *App) Startup(ctx context.Context) {
 			}
 		}
 		a.duplexMode.Store(enabled)
+		a.settingsMu.Lock()
+		a.settings.DuplexMode = enabled
+		settings := a.settings
+		a.settingsMu.Unlock()
+		if err := a.persistSettings(settings); err != nil {
+			a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
+		}
 		a.emitRaw("duplex:state", map[string]any{"enabled": enabled})
 	})
 	wailsruntime.EventsOn(ctx, "window:size-save", func(data ...interface{}) {
@@ -263,7 +291,7 @@ func (a *App) Startup(ctx context.Context) {
 		settings := a.settings
 		a.settingsMu.Unlock()
 		if a.configPath != "" {
-			if err := storage.SaveSettings(a.configPath, settings); err != nil {
+			if err := a.persistSettingsFile(a.configPath, settings); err != nil {
 				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
 			}
 		}
@@ -302,7 +330,7 @@ func (a *App) Startup(ctx context.Context) {
 		settings := a.settings
 		a.settingsMu.Unlock()
 		if a.configPath != "" {
-			if err := storage.SaveSettings(a.configPath, settings); err != nil {
+			if err := a.persistSettingsFile(a.configPath, settings); err != nil {
 				a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
 				return
 			}
@@ -357,7 +385,7 @@ func (a *App) Startup(ctx context.Context) {
 		settings := a.settings
 		a.settingsMu.Unlock()
 		if a.configPath != "" {
-			_ = storage.SaveSettings(a.configPath, settings)
+			_ = a.persistSettingsFile(a.configPath, settings)
 		}
 		a.emit(model.EventSettingsState, settings)
 	})
@@ -405,6 +433,7 @@ func (a *App) Startup(ctx context.Context) {
 			a.settings = settings
 			a.store = decode.NewStore(settings.DecodeWindowLimit)
 			a.settingsMu.Unlock()
+			a.duplexMode.Store(settings.DuplexMode)
 			a.frequencyMu.Lock()
 			a.rxFrequency = settings.RXFrequencyHz
 			a.txFrequency = settings.TXFrequencyHz
@@ -413,13 +442,11 @@ func (a *App) Startup(ctx context.Context) {
 				wailsruntime.WindowSetSize(ctx, settings.Layout.WindowWidth, settings.Layout.WindowHeight)
 			}
 			if migrated {
-				_ = storage.SaveSettings(a.configPath, settings)
+				_ = a.persistSettingsFile(a.configPath, settings)
 			}
 		}
 	}
-	if err := a.ensureBundledHamlib(); err != nil {
-		a.emitRaw("hamlib:bundle-error", map[string]any{"error": err.Error()})
-	}
+	// NET rigctl speaks TCP directly; no local Hamlib DLL or rigctld process is required.
 	wailsruntime.EventsOn(ctx, "qso:dxcall", func(data ...interface{}) {
 		if len(data) == 0 {
 			return
@@ -622,7 +649,7 @@ func (a *App) Startup(ctx context.Context) {
 				}
 			}
 		}
-		result := a.testPTTConfig(cfg, on)
+		result := a.runPTTTest(cfg, on)
 		result["kind"] = "ptt"
 		a.emit(model.EventRadioTest, result)
 	})
@@ -984,31 +1011,57 @@ func (a *App) Startup(ctx context.Context) {
 
 func normalizeLoadedSettings(s model.Settings, recordDir string) (model.Settings, bool) {
 	changed := false
-	// The radio model is the authoritative device selection. Backend remains
-	// persisted only for backward compatibility with older settings files.
-	if s.Radio.RigModelID <= 0 {
-		if s.Radio.Backend != "none" || s.Radio.RigName != "None" {
+	// NET radio activation is a persisted property, independent from PTT.
+	// Legacy NET backend names are migrated to the canonical rigctld-net value.
+	storedBackend := strings.ToLower(strings.TrimSpace(s.Radio.Backend))
+	legacyNoRig := storedBackend == "hamlib-rigctld" && s.Radio.RigModelID <= 0 && !s.Radio.Enabled
+	shouldEnableNET := s.Radio.Enabled || storedBackend == "rigctld-net" || storedBackend == "hamlib-net-rigctl" || (storedBackend == "hamlib-rigctld" && s.Radio.RigModelID > 0)
+	if s.Radio.Enabled != shouldEnableNET {
+		s.Radio.Enabled = shouldEnableNET
+		changed = true
+	}
+	if shouldEnableNET {
+		if s.Radio.Backend != "rigctld-net" {
+			changed = true
+		}
+		s.Radio.Backend = "rigctld-net"
+	} else {
+		if s.Radio.Backend != "none" {
 			changed = true
 		}
 		s.Radio.Backend = "none"
+		if s.Radio.RigModelID != 0 || s.Radio.RigName != "None" {
+			changed = true
+		}
 		s.Radio.RigModelID = 0
 		s.Radio.RigName = "None"
+	}
+	// Keep the historical fallback only for the exact legacy local-Hamlib
+	// representation. The explicit NET Enabled field must survive RTS/DTR/VOX.
+	if legacyNoRig {
 		if !strings.EqualFold(strings.TrimSpace(s.Radio.PTTMethod), "VOX") {
 			s.Radio.PTTMethod = "VOX"
 			changed = true
 		}
 	} else {
-		if s.Radio.Backend != "hamlib-rigctld" {
-			s.Radio.Backend = "hamlib-rigctld"
-			changed = true
-		}
-		if strings.TrimSpace(s.Radio.RigName) == "" || strings.EqualFold(strings.TrimSpace(s.Radio.RigName), "None") {
-			// Keep the numeric model selection even if the human label is not
-			// available until Hamlib is enumerated again. Do not mark the settings
-			// dirty here: enumeration will supply the display name when available.
-		}
-		method := strings.ToUpper(strings.TrimSpace(s.Radio.PTTMethod))
-		if method != "VOX" && method != "CAT" && method != "DTR" && method != "RTS" {
+		normalizedPTTMethod := strings.ToUpper(strings.TrimSpace(s.Radio.PTTMethod))
+		switch normalizedPTTMethod {
+		case "CAT", "RIGCTL":
+			if s.Radio.PTTMethod != "Rigctl" {
+				s.Radio.PTTMethod = "Rigctl"
+				changed = true
+			}
+		case "DTR", "RTS":
+			if s.Radio.PTTMethod != normalizedPTTMethod {
+				s.Radio.PTTMethod = normalizedPTTMethod
+				changed = true
+			}
+		case "VOX":
+			if s.Radio.PTTMethod != "VOX" {
+				s.Radio.PTTMethod = "VOX"
+				changed = true
+			}
+		default:
 			s.Radio.PTTMethod = "VOX"
 			changed = true
 		}
@@ -1053,12 +1106,15 @@ func normalizeLoadedSettings(s model.Settings, recordDir string) (model.Settings
 	if normalizeFrequencyBands(&s) {
 		changed = true
 	}
+
 	return s, changed
+
 }
 
 func (a *App) DomReady(ctx context.Context) {
 	a.ctx = ctx
 	a.emit(model.EventSettingsState, a.Settings())
+	a.emitRaw("duplex:state", map[string]any{"enabled": a.duplexMode.Load()})
 	a.emit(model.EventAudioDevices, map[string]any{"inputs": []audio.Device{}, "outputs": []audio.Device{}})
 	a.emit(model.EventAudioState, map[string]any{"running": false})
 	a.frequencyMu.RLock()
@@ -1088,7 +1144,7 @@ func (a *App) deferredStartup() {
 			a.emit(model.EventAudioState, map[string]any{"running": false, "error": err.Error()})
 		}
 	}
-	if s.Radio.RigModelID > 0 {
+	if strings.EqualFold(strings.TrimSpace(s.Radio.Backend), "rigctld-net") {
 		time.Sleep(250 * time.Millisecond)
 		if err := a.ConnectRadio(); err != nil {
 			a.emit(model.EventRadioTest, map[string]any{"ok": false, "kind": "connect", "error": err.Error()})
@@ -1111,7 +1167,7 @@ func (a *App) BeforeClose(ctx context.Context) bool {
 		settings := a.settings
 		a.settingsMu.Unlock()
 		if a.configPath != "" {
-			_ = storage.SaveSettings(a.configPath, settings)
+			_ = a.persistSettingsFile(a.configPath, settings)
 		}
 	}
 	a.stopRadioMeterPolling()
@@ -1121,11 +1177,11 @@ func (a *App) BeforeClose(ctx context.Context) bool {
 		_ = a.recorder.Stop()
 	}
 	_ = a.hotkeys.Close()
+	a.closeTestRadio(false)
+	_ = a.DisconnectRadio()
 	if a.pttSerial != nil {
 		_ = a.pttSerial.Close()
 	}
-	a.closeTestRadio(false)
-	_ = a.DisconnectRadio()
 	return false
 }
 
@@ -1139,24 +1195,65 @@ func (a *App) Settings() model.Settings {
 	return s
 }
 
+func (a *App) persistSettings(settings model.Settings) error {
+	if a.configPath == "" {
+		return nil
+	}
+	a.settingsSaveMu.Lock()
+	defer a.settingsSaveMu.Unlock()
+	a.settingsMu.RLock()
+	settings.DuplexMode = a.settings.DuplexMode
+	a.settingsMu.RUnlock()
+	return storage.SaveSettings(a.configPath, settings)
+}
+
+// sameRadioControlConfig excludes fields owned by the independent PTT block.
+// PTT changes must not disconnect/reconnect the NET frequency-control session.
+func sameRadioControlConfig(a, b model.RadioSettings) bool {
+	a.PTTMethod, b.PTTMethod = "", ""
+	a.PTTSerialPort, b.PTTSerialPort = "", ""
+	a.ForceDTR, b.ForceDTR = "", ""
+	a.ForceRTS, b.ForceRTS = "", ""
+	return a == b
+}
+
 func (a *App) SaveSettings(settings model.Settings) error {
 	// A configuration test session is transient. Close it before applying
 	// settings. If the settings dialog had temporarily displaced a live radio,
 	// remember that fact so the live connection is restored after the save.
 	testRestoreLive := a.closeTestRadio(false)
-	// Model ID is authoritative. Keep Backend only as a compatibility field
-	// for old settings/telemetry.
-	if settings.Radio.RigModelID <= 0 {
+	// The explicit Enabled flag controls NET connection activation. PTT is independent.
+	storedBackend := strings.ToLower(strings.TrimSpace(settings.Radio.Backend))
+	legacyNoRig := storedBackend == "hamlib-rigctld" && settings.Radio.RigModelID <= 0 && !settings.Radio.Enabled
+	shouldEnableNET := settings.Radio.Enabled || storedBackend == "rigctld-net" || storedBackend == "hamlib-net-rigctl" || (storedBackend == "hamlib-rigctld" && settings.Radio.RigModelID > 0)
+	settings.Radio.Enabled = shouldEnableNET
+	if shouldEnableNET {
+		settings.Radio.Backend = "rigctld-net"
+	} else {
 		settings.Radio.Backend = "none"
 		settings.Radio.RigModelID = 0
 		settings.Radio.RigName = "None"
+	}
+	if legacyNoRig {
 		settings.Radio.PTTMethod = "VOX"
 	} else {
-		settings.Radio.Backend = "hamlib-rigctld"
-		method := strings.ToUpper(strings.TrimSpace(settings.Radio.PTTMethod))
-		if method != "VOX" && method != "CAT" && method != "DTR" && method != "RTS" {
+		normalizedPTTMethod := strings.ToUpper(strings.TrimSpace(settings.Radio.PTTMethod))
+		switch normalizedPTTMethod {
+		case "CAT", "RIGCTL":
+			settings.Radio.PTTMethod = "Rigctl"
+		case "DTR", "RTS":
+			settings.Radio.PTTMethod = normalizedPTTMethod
+		case "VOX":
+			settings.Radio.PTTMethod = "VOX"
+		default:
 			settings.Radio.PTTMethod = "VOX"
 		}
+	}
+	if strings.TrimSpace(settings.Radio.Host) == "" {
+		settings.Radio.Host = "127.0.0.1"
+	}
+	if settings.Radio.Port < 1 || settings.Radio.Port > 65535 {
+		settings.Radio.Port = 4532
 	}
 	if strings.TrimSpace(settings.Audio.RecordDirectory) == "" {
 		settings.Audio.RecordDirectory = filepath.Join(a.dataDir(), "record")
@@ -1206,6 +1303,12 @@ func (a *App) SaveSettings(settings model.Settings) error {
 	if settings.Audio.TxAudioLevel > 100 {
 		settings.Audio.TxAudioLevel = 100
 	}
+	if strings.TrimSpace(settings.Radio.Host) == "" {
+		settings.Radio.Host = "127.0.0.1"
+	}
+	if settings.Radio.Port < 1 || settings.Radio.Port > 65535 {
+		settings.Radio.Port = 4532
+	}
 	if settings.Radio.PollIntervalSec < 1 {
 		settings.Radio.PollIntervalSec = 1
 	}
@@ -1214,6 +1317,8 @@ func (a *App) SaveSettings(settings model.Settings) error {
 	}
 	a.settingsMu.Lock()
 	old := a.settings
+	// Keep the live main-window duplex toggle when this form saves other settings.
+	settings.DuplexMode = old.DuplexMode
 	// Main-window size is persisted only by the dedicated window resize/close path.
 	// Keep it out of generic settings saves so a stale frontend settings snapshot
 	// cannot overwrite the user's latest window dimensions.
@@ -1223,6 +1328,10 @@ func (a *App) SaveSettings(settings model.Settings) error {
 	if old.Layout.WindowHeight > 0 {
 		settings.Layout.WindowHeight = old.Layout.WindowHeight
 	}
+
+	// Keep independent PTT choices when CAT/rig selection is None. A settings
+	// save must never silently change RTS, DTR or VOX back to VOX.
+
 	a.settings = settings
 	stored := a.store
 	a.settingsMu.Unlock()
@@ -1236,7 +1345,7 @@ func (a *App) SaveSettings(settings model.Settings) error {
 		stored.SetLimit(settings.DecodeWindowLimit)
 	}
 	if a.configPath != "" {
-		if err := storage.SaveSettings(a.configPath, settings); err != nil {
+		if err := a.persistSettingsFile(a.configPath, settings); err != nil {
 			return err
 		}
 	}
@@ -1266,10 +1375,10 @@ func (a *App) SaveSettings(settings model.Settings) error {
 			}
 		}
 	}
-	radioChanged := old.Radio != settings.Radio
+	radioChanged := !sameRadioControlConfig(old.Radio, settings.Radio)
 	if radioChanged || testRestoreLive {
 		_ = a.DisconnectRadio()
-		if settings.Radio.RigModelID > 0 {
+		if strings.EqualFold(strings.TrimSpace(settings.Radio.Backend), "rigctld-net") {
 			go func() {
 				if err := a.ConnectRadio(); err != nil {
 					a.emit(model.EventRadioTest, map[string]any{"ok": false, "kind": "connect", "error": err.Error()})
@@ -1307,15 +1416,11 @@ func (a *App) StartReceiver() error {
 	}
 	workers := s.Decoder.Threads
 	if workers <= 0 {
-		// Preserve the original realtime decode throughput: use the available
-		// logical CPUs, capped at three workers so a normal desktop keeps one
-		// or more cores available for the UI/audio stack.
-		workers = runtime.NumCPU()
-		if workers > 3 {
-			workers = 3
-		}
-		if workers < 1 {
-			workers = 1
+		// Automatic mode reserves more CPU for the audio callback and Wails UI.
+		// Low-end systems use one decoder worker; larger systems use two.
+		workers = 1
+		if runtime.NumCPU() >= 8 {
+			workers = 2
 		}
 	}
 	if workers > 3 {
@@ -2087,14 +2192,16 @@ func buildRigctldArgs(cfg model.RadioSettings, host string, tcpPort int, serialP
 		"-C", fmt.Sprintf("data_bits=%d,stop_bits=%d,serial_handshake=%s", dataBits, stopBits, handshake),
 	}
 
-	// Match WSJT-X's PTT model: VOX disables Hamlib PTT, CAT leaves the
-	// backend's CAT PTT type untouched, and DTR/RTS explicitly select the
-	// corresponding serial line. A separate PTT port is only supplied when it
-	// is actually different from the CAT port.
+	// PTT is configured inside rigctld: VOX disables Hamlib PTT, Rigctl uses
+	// the rig's CAT PTT backend, and DTR/RTS use the configured serial control line.
 	pttMethod := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
 	switch pttMethod {
 	case "VOX", "":
 		args = append(args, "-C", "ptt_type=None")
+	case "RIGCTL", "CAT":
+		// Use Hamlib's rig PTT backend explicitly. All PTT transitions are sent
+		// through the rigctld TCP connection, just like frequency and mode.
+		args = append(args, "-C", "ptt_type=RIG")
 	case "DTR", "RTS":
 		args = append(args, "-C", "ptt_type="+pttMethod)
 		pttPort := strings.TrimSpace(cfg.PTTSerialPort)
@@ -2105,12 +2212,14 @@ func buildRigctldArgs(cfg model.RadioSettings, host string, tcpPort int, serialP
 
 	// Force control-line states are separate from PTT selection. For RTS we
 	// follow WSJT-X's rule not to fight a hardware-handshake configuration.
+	pttPort := strings.TrimSpace(cfg.PTTSerialPort)
+	pttUsesCATPort := pttPort == "" || strings.EqualFold(pttPort, serialPort)
 	forceDTR := strings.ToLower(strings.TrimSpace(cfg.ForceDTR))
-	if forceDTR == "on" || forceDTR == "off" {
+	if (forceDTR == "on" || forceDTR == "off") && !(pttMethod == "DTR" && pttUsesCATPort) {
 		args = append(args, "-C", "dtr_state="+strings.ToUpper(forceDTR))
 	}
 	forceRTS := strings.ToLower(strings.TrimSpace(cfg.ForceRTS))
-	if (forceRTS == "on" || forceRTS == "off") && handshake != "Hardware" {
+	if (forceRTS == "on" || forceRTS == "off") && handshake != "Hardware" && !(pttMethod == "RTS" && pttUsesCATPort) {
 		args = append(args, "-C", "rts_state="+strings.ToUpper(forceRTS))
 	}
 	return args
@@ -2189,107 +2298,78 @@ func (a *App) pollRadioState() {
 }
 func (a *App) setPTT(on bool) error {
 	a.settingsMu.RLock()
-	method := strings.ToUpper(a.settings.Radio.PTTMethod)
-	port := a.settings.Radio.PTTSerialPort
+	cfg := a.settings.Radio
 	a.settingsMu.RUnlock()
-	if method == "VOX" || method == "" {
+	method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
+	switch method {
+	case "", "VOX":
+		// VOX is triggered by the outgoing audio; no CAT PTT command is sent.
 		return nil
-	}
-	if method == "DTR" || method == "RTS" {
-		if a.pttSerial == nil {
-			return fmt.Errorf("PTT 串口控制器不可用")
-		}
-		if strings.TrimSpace(port) == "" {
-			ports := radio.AvailableSerialPorts()
-			if len(ports) > 0 {
-				port = ports[0]
-			}
-		}
-		if err := a.pttSerial.Set(port, method, on); err != nil {
-			return err
-		}
-		return a.applyForcedControlLines(method)
+	case "DTR", "RTS":
+		return a.setSerialPTTForConfig(cfg, method, on)
+	case "CAT", "RIGCTL":
+		// CAT is kept as a legacy config alias. The network UI uses Rigctl.
+	default:
+		return fmt.Errorf("不支持的 PTT 方法: %s", method)
 	}
 	a.radioMu.Lock()
 	r := a.radio
 	a.radioMu.Unlock()
 	if r == nil {
-		return fmt.Errorf("电台尚未连接")
+		return fmt.Errorf("NET rigctl 电台尚未连接")
 	}
-	if err := r.PTT(context.Background(), on); err != nil {
-		return err
-	}
-	return a.applyForcedControlLines(method)
-}
-
-func (a *App) applyForcedControlLines(pttMethod string) error {
-	if a.pttSerial == nil {
-		return nil
-	}
-	a.settingsMu.RLock()
-	port := a.settings.Radio.PTTSerialPort
-	forceDTR := strings.ToLower(strings.TrimSpace(a.settings.Radio.ForceDTR))
-	forceRTS := strings.ToLower(strings.TrimSpace(a.settings.Radio.ForceRTS))
-	a.settingsMu.RUnlock()
-	if strings.TrimSpace(port) == "" {
-		return nil
-	}
-	// Do not override the line currently being used as the active PTT source.
-	if pttMethod != "DTR" {
-		if forceDTR == "on" || forceDTR == "off" {
-			if err := a.pttSerial.Set(port, "DTR", forceDTR == "on"); err != nil {
-				return err
-			}
-		}
-	}
-	if pttMethod != "RTS" {
-		if forceRTS == "on" || forceRTS == "off" {
-			if err := a.pttSerial.Set(port, "RTS", forceRTS == "on"); err != nil {
-				return err
-			}
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := r.PTT(ctx, on); err != nil {
+		return fmt.Errorf("rigctld PTT 命令失败: %w", err)
 	}
 	return nil
 }
 
 func (a *App) ConnectRadio() error {
-	if err := a.ensureBundledHamlib(); err != nil {
-		return fmt.Errorf("准备内置 Hamlib 失败: %w", err)
-	}
 	a.settingsMu.RLock()
 	cfg := a.settings.Radio
 	a.settingsMu.RUnlock()
-	if cfg.RigModelID <= 0 {
-		return fmt.Errorf("未选择电台")
+	if !strings.EqualFold(strings.TrimSpace(cfg.Backend), "rigctld-net") {
+		return fmt.Errorf("尚未启用 NET rigctl 电台连接")
 	}
-	var r radio.Radio
-	r = radio.NewRigctld(radio.RigctldConfig{Address: cfg.Host, Port: cfg.Port, Mode: cfg.Mode, PassbandHz: cfg.PassbandHz})
-	if err := r.Open(context.Background()); err != nil {
-		if !a.maybeStartRigctld(cfg) {
-			return err
-		}
-		last := err
-		for i := 0; i < 20; i++ {
-			time.Sleep(100 * time.Millisecond)
-			if e := r.Open(context.Background()); e == nil {
-				last = nil
-				break
-			} else {
-				last = e
-			}
-		}
-		if last != nil {
-			a.radioMu.Lock()
-			cmd := a.rigctldCmd
-			a.rigctldCmd = nil
-			a.radioMu.Unlock()
-			if cmd != nil && cmd.Process != nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-			return last
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" {
+		return fmt.Errorf("rigctld 服务器地址不能为空")
+	}
+	port := cfg.Port
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("rigctld TCP 端口无效: %d", port)
+	}
+
+	r := radio.NewRigctld(radio.RigctldConfig{Address: host, Port: port, Mode: cfg.Mode, PassbandHz: cfg.PassbandHz})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := r.Open(ctx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("连接 rigctld %s:%d 失败: %w", host, port, err)
+	}
+
+	modeSetError := ""
+	if requestedMode := strings.TrimSpace(cfg.Mode); requestedMode != "" {
+		ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+		err = r.SetMode(ctx, requestedMode)
+		cancel()
+		if err != nil {
+			// Some rigs expose different mode tokens. Keep the connection usable
+			// and report a rejected startup mode to the operator.
+			modeSetError = err.Error()
 		}
 	}
+	ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+	freq, fe := r.Frequency(ctx)
+	mode, me := r.Mode(ctx)
+	cancel()
+	if fe != nil && me != nil {
+		_ = r.Close()
+		return fmt.Errorf("已连接 rigctld，但无法读取频率和模式: %v; %v", fe, me)
+	}
+
 	a.radioMu.Lock()
 	old := a.radio
 	a.radio = r
@@ -2297,40 +2377,29 @@ func (a *App) ConnectRadio() error {
 	if old != nil {
 		_ = old.Close()
 	}
-	if cfg.Mode != "" {
-		_ = r.SetMode(context.Background(), cfg.Mode)
+	// Frequency/mode connection does not probe or toggle independent PTT hardware.
+	if strings.EqualFold(strings.TrimSpace(cfg.SplitMode), "Rig") {
+		ctx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+		_ = r.SetSplit(ctx, "VFOB")
+		if fe == nil {
+			_ = r.SetSplitFrequency(ctx, freq)
+		}
+		cancel()
 	}
-	freq, fe := r.Frequency(context.Background())
-	mode, me := r.Mode(context.Background())
 	if fe == nil {
 		a.frequencyMu.Lock()
 		a.dialFrequency = freq
 		a.frequencyMu.Unlock()
 	}
-	if cfg.SplitMode == "Rig" {
-		if sr, ok := r.(interface {
-			SetSplit(context.Context, string) error
-			SetSplitFrequency(context.Context, int64) error
-		}); ok {
-			_ = sr.SetSplit(context.Background(), "VFOB")
-			if fe == nil {
-				_ = sr.SetSplitFrequency(context.Background(), freq)
-			}
-		}
-	}
-	if cfg.PTTMethod == "DTR" || cfg.PTTMethod == "RTS" {
-		if err := a.setPTT(false); err != nil {
-			return err
-		}
-	} else if err := a.applyForcedControlLines(strings.ToUpper(cfg.PTTMethod)); err != nil {
-		return err
-	}
-	st := map[string]any{"connected": true, "frequencyHz": freq, "mode": mode, "controlMode": radioControlMode(cfg.Backend, cfg.PTTMethod)}
+	st := map[string]any{"connected": true, "frequencyHz": freq, "mode": mode, "controlMode": radioControlMode(cfg.Backend, cfg.PTTMethod), "host": host, "port": port}
 	if fe != nil {
 		st["frequencyError"] = fe.Error()
 	}
 	if me != nil {
 		st["modeError"] = me.Error()
+	}
+	if modeSetError != "" {
+		st["modeSetError"] = modeSetError
 	}
 	a.emit(model.EventRadioState, st)
 	a.startRadioMeterPolling(r)
@@ -2477,25 +2546,46 @@ func (a *App) TestRadio() map[string]any {
 // test uses the uncommitted settings from the dialog, opens the rig and keeps
 // that test connection alive while the dialog remains open. This allows the
 // subsequent Test PTT operation to use the same live rig session.
+func (a *App) setSerialPTTForConfig(cfg model.RadioSettings, method string, on bool) error {
+	if a.pttSerial == nil {
+		return fmt.Errorf("PTT 串口控制器不可用")
+	}
+	port := strings.TrimSpace(cfg.PTTSerialPort)
+	if port == "" {
+		ports := radio.AvailableSerialPorts()
+		if len(ports) > 0 {
+			port = ports[0]
+		}
+	}
+	if port == "" {
+		return fmt.Errorf("没有可用的串行端口")
+	}
+	return a.pttSerial.Set(port, method, on)
+}
+
 func (a *App) TestRadioSettings(settings model.Settings) map[string]any {
 	return a.testRadioConfig(settings.Radio)
 }
 
 func testRadioConfigEqual(aCfg, bCfg model.RadioSettings) bool {
-	return aCfg.RigModelID == bCfg.RigModelID &&
-		strings.EqualFold(strings.TrimSpace(aCfg.SerialPort), strings.TrimSpace(bCfg.SerialPort)) &&
-		aCfg.Baud == bCfg.Baud && aCfg.DataBits == bCfg.DataBits && aCfg.StopBits == bCfg.StopBits &&
-		strings.EqualFold(strings.TrimSpace(aCfg.Handshake), strings.TrimSpace(bCfg.Handshake)) &&
-		strings.EqualFold(strings.TrimSpace(aCfg.PTTMethod), strings.TrimSpace(bCfg.PTTMethod)) &&
+	method := func(s string) string {
+		v := strings.ToUpper(strings.TrimSpace(s))
+		if v == "CAT" {
+			return "RIGCTL"
+		}
+		return v
+	}
+	return strings.EqualFold(strings.TrimSpace(aCfg.Host), strings.TrimSpace(bCfg.Host)) &&
+		aCfg.Port == bCfg.Port &&
+		method(aCfg.PTTMethod) == method(bCfg.PTTMethod) &&
 		strings.EqualFold(strings.TrimSpace(aCfg.PTTSerialPort), strings.TrimSpace(bCfg.PTTSerialPort)) &&
-		strings.EqualFold(strings.TrimSpace(aCfg.ForceDTR), strings.TrimSpace(bCfg.ForceDTR)) &&
-		strings.EqualFold(strings.TrimSpace(aCfg.ForceRTS), strings.TrimSpace(bCfg.ForceRTS)) &&
-		strings.EqualFold(strings.TrimSpace(aCfg.Host), strings.TrimSpace(bCfg.Host)) &&
-		aCfg.Port == bCfg.Port && strings.EqualFold(strings.TrimSpace(aCfg.Mode), strings.TrimSpace(bCfg.Mode)) &&
-		aCfg.PassbandHz == bCfg.PassbandHz
+		strings.EqualFold(strings.TrimSpace(aCfg.Mode), strings.TrimSpace(bCfg.Mode)) &&
+		aCfg.PassbandHz == bCfg.PassbandHz &&
+		strings.EqualFold(strings.TrimSpace(aCfg.SplitMode), strings.TrimSpace(bCfg.SplitMode))
 }
 
 func (a *App) closeTestRadio(restoreLive bool) bool {
+	a.cancelPTTTestWatchdog()
 	a.radioTestMu.Lock()
 	r := a.testRadio
 	cmd := a.testRigctldCmd
@@ -2508,11 +2598,13 @@ func (a *App) closeTestRadio(restoreLive bool) bool {
 	a.testRestoreLiveRadio = false
 	a.radioTestMu.Unlock()
 
-	if method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod)); method == "DTR" || method == "RTS" {
+	method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
+	if method == "DTR" || method == "RTS" {
 		_ = a.setSerialPTTForConfig(cfg, method, false)
-		_ = a.applyForcedControlLinesConfig(cfg, method)
-	} else if r != nil {
-		_ = r.PTT(context.Background(), false)
+	} else if r != nil && method != "VOX" && method != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = r.PTT(ctx, false)
+		cancel()
 	}
 	if r != nil {
 		_ = r.Close()
@@ -2521,7 +2613,6 @@ func (a *App) closeTestRadio(restoreLive bool) bool {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	}
-
 	if restoreLive && wasLive {
 		go func() {
 			if err := a.ConnectRadio(); err != nil {
@@ -2542,10 +2633,13 @@ func (a *App) storeTestRadio(r radio.Radio, cmd *exec.Cmd, cfg model.RadioSettin
 }
 
 func (a *App) openTestRadio(cfg model.RadioSettings) (radio.Radio, *exec.Cmd, map[string]any) {
-	if cfg.RigModelID <= 0 {
-		return nil, nil, map[string]any{"ok": false, "error": "未选择 Hamlib 电台设备"}
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" {
+		return nil, nil, map[string]any{"ok": false, "error": "rigctld 服务器地址不能为空"}
 	}
-
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return nil, nil, map[string]any{"ok": false, "error": "rigctld TCP 端口无效"}
+	}
 	wasRestorePending := a.closeTestRadio(false)
 	a.radioMu.Lock()
 	live := a.radio
@@ -2558,87 +2652,51 @@ func (a *App) openTestRadio(cfg model.RadioSettings) (radio.Radio, *exec.Cmd, ma
 	a.testRestoreLiveRadio = wasRestorePending
 	a.radioTestMu.Unlock()
 
-	r := radio.NewRigctld(radio.RigctldConfig{
-		Address:    cfg.Host,
-		Port:       cfg.Port,
-		Mode:       cfg.Mode,
-		PassbandHz: cfg.PassbandHz,
-	})
+	r := radio.NewRigctld(radio.RigctldConfig{Address: host, Port: cfg.Port, Mode: cfg.Mode, PassbandHz: cfg.PassbandHz})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var cmd *exec.Cmd
-	started := false
-	if err := r.Open(ctx); err != nil {
-		var startOK bool
-		cmd, startOK = a.startRigctld(cfg, false)
-		if !startOK {
-			_ = r.Close()
-			return nil, nil, map[string]any{"ok": false, "error": err.Error()}
-		}
-		started = true
-		last := err
-		for i := 0; i < 40; i++ {
-			openErr := r.Open(ctx)
-			if openErr == nil {
-				last = nil
-				break
-			}
-			last = openErr
-			time.Sleep(100 * time.Millisecond)
-		}
-		if last != nil {
-			_ = r.Close()
-			if cmd != nil && cmd.Process != nil {
-				_ = cmd.Process.Kill()
-				_ = cmd.Wait()
-			}
-			return nil, nil, map[string]any{"ok": false, "error": last.Error()}
-		}
+	err := r.Open(ctx)
+	if err != nil {
+		cancel()
+		_ = r.Close()
+		return nil, nil, map[string]any{"ok": false, "error": fmt.Sprintf("连接 rigctld %s:%d 失败: %v", host, cfg.Port, err)}
 	}
-
 	freq, fe := r.Frequency(ctx)
 	mode, me := r.Mode(ctx)
+	cancel()
 	if fe != nil || me != nil {
 		_ = r.Close()
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-		res := map[string]any{"ok": false, "frequencyHz": freq, "mode": mode, "temporaryRigctld": started}
+		msg := "无法读取电台状态"
 		if fe != nil {
-			res["frequencyError"] = fe.Error()
-		}
-		if me != nil {
-			res["modeError"] = me.Error()
-		}
-		if fe != nil {
-			res["error"] = fe.Error()
+			msg = fe.Error()
 		} else if me != nil {
-			res["error"] = me.Error()
+			msg = me.Error()
 		}
-		return nil, nil, res
+		return nil, nil, map[string]any{"ok": false, "error": msg}
 	}
+	a.storeTestRadio(r, nil, cfg)
+	return r, nil, map[string]any{"ok": true, "online": true, "frequencyHz": freq, "mode": mode, "temporaryRigctld": false, "pttEligible": testPTTEligible(cfg), "host": host, "port": cfg.Port}
+}
 
-	a.storeTestRadio(r, cmd, cfg)
-	return r, cmd, map[string]any{
-		"ok":               true,
-		"online":           true,
-		"frequencyHz":      freq,
-		"mode":             mode,
-		"temporaryRigctld": started,
-		"pttEligible":      testPTTEligible(cfg),
-	}
+// radioControlConfigEqual deliberately ignores PTT-only settings. A change
+// from VOX to RTS/DTR (or a PTT-port change) must not disconnect the rigctl
+// frequency/mode controller.
+func radioControlConfigEqual(a, b model.RadioSettings) bool {
+	a.PTTMethod, b.PTTMethod = "", ""
+	a.PTTSerialPort, b.PTTSerialPort = "", ""
+	a.ForceDTR, b.ForceDTR = "", ""
+	a.ForceRTS, b.ForceRTS = "", ""
+	return a == b
 }
 
 func testPTTEligible(cfg model.RadioSettings) bool {
 	switch strings.ToUpper(strings.TrimSpace(cfg.PTTMethod)) {
 	case "DTR", "RTS":
-		return true // WSJT-X allows direct serial PTT tests even with rig=None.
-	case "CAT":
-		return cfg.RigModelID > 0
+		// Local serial PTT can be verified without a network radio connection.
+		return true
+	case "CAT", "RIGCTL":
+		return strings.TrimSpace(cfg.Host) != "" && cfg.Port >= 1 && cfg.Port <= 65535
 	default:
-		return false
+		return false // VOX is activated by the outgoing audio stream.
 	}
 }
 
@@ -2647,90 +2705,158 @@ func (a *App) testRadioConfig(cfg model.RadioSettings) map[string]any {
 	return res
 }
 
-func (a *App) setSerialPTTForConfig(cfg model.RadioSettings, method string, on bool) error {
-	if a.pttSerial == nil {
-		return fmt.Errorf("PTT 串口控制器不可用")
+const radioPTTTestLimit = 30 * time.Second
+
+// startPTTTestWatchdog arms a backend-owned hard limit. A duplicate ON result
+// must not restart the timer and extend a continuous transmission indefinitely.
+func (a *App) startPTTTestWatchdog(cfg model.RadioSettings) {
+	a.pttTestMu.Lock()
+	defer a.pttTestMu.Unlock()
+	if a.pttTestActive {
+		return
 	}
-	port := strings.TrimSpace(cfg.PTTSerialPort)
-	if port == "" {
-		ports := radio.AvailableSerialPorts()
-		if len(ports) > 0 {
-			port = ports[0]
-		}
-	}
-	if port == "" {
-		return fmt.Errorf("没有可用的串行端口")
-	}
-	return a.pttSerial.Set(port, method, on)
+	a.pttTestGeneration++
+	generation := a.pttTestGeneration
+	a.pttTestActive = true
+	a.pttTestConfig = cfg
+	a.pttTestTimedOut = false
+	a.pttTestTimer = time.AfterFunc(radioPTTTestLimit, func() {
+		a.releasePTTTest(generation, true)
+	})
 }
 
-func (a *App) applyForcedControlLinesConfig(cfg model.RadioSettings, pttMethod string) error {
-	if a.pttSerial == nil {
-		return nil
+// cancelPTTTestWatchdog invalidates any callback that has not started. Callers
+// still send an explicit PTT-OFF command or close the active test connection.
+func (a *App) cancelPTTTestWatchdog() {
+	a.pttTestMu.Lock()
+	if a.pttTestTimer != nil {
+		a.pttTestTimer.Stop()
+		a.pttTestTimer = nil
 	}
-	port := strings.TrimSpace(cfg.PTTSerialPort)
-	if port == "" {
-		return nil
+	a.pttTestGeneration++
+	a.pttTestActive = false
+	a.pttTestConfig = model.RadioSettings{}
+	a.pttTestTimedOut = false
+	a.pttTestMu.Unlock()
+}
+
+func (a *App) schedulePTTTestReleaseRetry(cfg model.RadioSettings, timedOut bool) {
+	a.pttTestMu.Lock()
+	if a.pttTestTimer != nil {
+		a.pttTestTimer.Stop()
 	}
-	forceDTR := strings.ToLower(strings.TrimSpace(cfg.ForceDTR))
-	forceRTS := strings.ToLower(strings.TrimSpace(cfg.ForceRTS))
-	if pttMethod != "DTR" && (forceDTR == "on" || forceDTR == "off") {
-		if err := a.pttSerial.Set(port, "DTR", forceDTR == "on"); err != nil {
-			return err
+	a.pttTestGeneration++
+	generation := a.pttTestGeneration
+	a.pttTestActive = true
+	a.pttTestConfig = cfg
+	a.pttTestTimedOut = timedOut
+	a.pttTestTimer = time.AfterFunc(time.Second, func() {
+		a.releasePTTTest(generation, timedOut)
+	})
+	a.pttTestMu.Unlock()
+}
+
+func (a *App) releasePTTTest(generation uint64, timedOut bool) {
+	a.pttTestMu.Lock()
+	if !a.pttTestActive || a.pttTestGeneration != generation {
+		a.pttTestMu.Unlock()
+		return
+	}
+	cfg := a.pttTestConfig
+	timedOut = timedOut || a.pttTestTimedOut
+	a.pttTestTimer = nil
+	a.pttTestMu.Unlock()
+
+	result := a.testPTTConfig(cfg, false)
+	result["kind"] = "ptt"
+	result["timeout"] = timedOut
+	if boolValue(result["ok"]) {
+		a.pttTestMu.Lock()
+		if a.pttTestGeneration == generation {
+			a.pttTestActive = false
+			a.pttTestConfig = model.RadioSettings{}
+			a.pttTestTimedOut = false
+			a.pttTestTimer = nil
 		}
+		a.pttTestMu.Unlock()
+		result["on"] = false
+		a.emit(model.EventRadioTest, result)
+		return
 	}
-	if pttMethod != "RTS" && (forceRTS == "on" || forceRTS == "off") {
-		if err := a.pttSerial.Set(port, "RTS", forceRTS == "on"); err != nil {
-			return err
+
+	// Keep retrying once per second until an OFF command succeeds. The PTT
+	// remains visibly active in the UI while the backend reports this failure.
+	result["on"] = true
+	result["retrying"] = true
+	result["error"] = "PTT 释放失败，后台正在每秒重试：" + firstErrorText(result)
+	a.emit(model.EventRadioTest, result)
+	a.pttTestMu.Lock()
+	if a.pttTestActive && a.pttTestGeneration == generation {
+		a.pttTestTimedOut = timedOut
+		a.pttTestTimer = time.AfterFunc(time.Second, func() {
+			a.releasePTTTest(generation, timedOut)
+		})
+	}
+	a.pttTestMu.Unlock()
+}
+
+func (a *App) runPTTTest(cfg model.RadioSettings, on bool) map[string]any {
+	if on {
+		result := a.testPTTConfig(cfg, true)
+		if boolValue(result["ok"]) {
+			a.startPTTTestWatchdog(cfg)
 		}
+		return result
 	}
-	return nil
+
+	// Cancel the 30 second timer before an operator-requested OFF command.
+	// If that command fails, schedule retry attempts so PTT cannot be forgotten.
+	a.cancelPTTTestWatchdog()
+	result := a.testPTTConfig(cfg, false)
+	if !boolValue(result["ok"]) {
+		a.schedulePTTTestReleaseRetry(cfg, false)
+		result["on"] = true
+		result["retrying"] = true
+	}
+	return result
 }
 
 func (a *App) testPTTConfig(cfg model.RadioSettings, on bool) map[string]any {
-	result := map[string]any{"ok": false, "on": on, "pttEligible": testPTTEligible(cfg)}
 	method := strings.ToUpper(strings.TrimSpace(cfg.PTTMethod))
+	result := map[string]any{"ok": false, "on": on, "pttEligible": testPTTEligible(cfg), "method": method}
 	if method == "VOX" || method == "" {
-		result["error"] = "VOX 不通过独立 PTT 控制线测试，请使用 Test CAT/实际音频触发 VOX"
+		result["error"] = "VOX 由发射音频触发，请使用实际音频测试"
 		return result
 	}
-	if method != "CAT" && method != "DTR" && method != "RTS" {
-		result["error"] = "不支持的 PTT 方法: " + method
-		return result
-	}
-	if cfg.RigModelID <= 0 && (method == "DTR" || method == "RTS") {
+	if method == "DTR" || method == "RTS" {
 		if err := a.setSerialPTTForConfig(cfg, method, on); err != nil {
 			result["error"] = err.Error()
 			return result
 		}
-		// Keep the active serial-test state so Test PTT remains a toggle and
-		// closing the dialog can always force the line back to RX.
 		a.radioTestMu.Lock()
 		a.testRadioCfg = cfg
 		a.testRadioOnline = true
 		a.radioTestMu.Unlock()
 		result["ok"] = true
 		result["online"] = true
-		result["method"] = method
 		return result
 	}
-	if cfg.RigModelID <= 0 {
-		result["error"] = "未选择 Hamlib 电台设备"
+	if method != "RIGCTL" && method != "CAT" {
+		result["error"] = "不支持的 PTT 方法: " + method
 		return result
 	}
-
 	a.radioTestMu.Lock()
 	r := a.testRadio
 	testCfg := a.testRadioCfg
 	online := a.testRadioOnline
 	a.radioTestMu.Unlock()
 	if r == nil || !online || !testRadioConfigEqual(testCfg, cfg) {
-		_, _, catResult := a.openTestRadio(cfg)
-		if !boolValue(catResult["ok"]) {
-			if errText := firstErrorText(catResult); errText != "" {
+		_, _, connectionResult := a.openTestRadio(cfg)
+		if !boolValue(connectionResult["ok"]) {
+			if errText := firstErrorText(connectionResult); errText != "" {
 				result["error"] = errText
 			} else {
-				result["error"] = "电台连接失败"
+				result["error"] = "NET rigctl 连接失败"
 			}
 			return result
 		}
@@ -2738,27 +2864,28 @@ func (a *App) testPTTConfig(cfg model.RadioSettings, on bool) map[string]any {
 		r = a.testRadio
 		a.radioTestMu.Unlock()
 	}
-
-	var err error
-	switch method {
-	case "CAT":
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		err = r.PTT(ctx, on)
-		cancel()
-	case "DTR", "RTS":
-		err = a.setSerialPTTForConfig(cfg, method, on)
-		if err == nil {
-			err = a.applyForcedControlLinesConfig(cfg, method)
-		}
+	if r == nil {
+		result["error"] = "NET rigctl 测试连接不可用"
+		return result
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	err := r.PTT(ctx, on)
+	cancel()
 	if err != nil {
 		result["error"] = err.Error()
 		return result
 	}
 	result["ok"] = true
+	result["online"] = true
 	result["method"] = method
-	result["frequencyHz"], _ = r.Frequency(context.Background())
-	result["mode"], _ = r.Mode(context.Background())
+	if !on {
+		if frequency, err := r.Frequency(context.Background()); err == nil {
+			result["frequencyHz"] = frequency
+		}
+		if mode, err := r.Mode(context.Background()); err == nil {
+			result["mode"] = mode
+		}
+	}
 	return result
 }
 
@@ -3082,7 +3209,7 @@ func (a *App) SetRXFrequency(hz int) error {
 	settings := a.settings
 	a.settingsMu.Unlock()
 	if a.configPath != "" {
-		if err := storage.SaveSettings(a.configPath, settings); err != nil {
+		if err := a.persistSettingsFile(a.configPath, settings); err != nil {
 			a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
 		}
 	}
@@ -3111,7 +3238,7 @@ func (a *App) SetTXFrequency(hz int) error {
 	settings := a.settings
 	a.settingsMu.Unlock()
 	if a.configPath != "" {
-		if err := storage.SaveSettings(a.configPath, settings); err != nil {
+		if err := a.persistSettingsFile(a.configPath, settings); err != nil {
 			a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
 		}
 	}
@@ -3257,13 +3384,17 @@ func bandDialFrequencyFromSettings(s model.Settings, band string) (int64, bool) 
 }
 
 func radioControlMode(backend, pttMethod string) string {
-	if strings.EqualFold(strings.TrimSpace(backend), "hamlib-rigctld") {
-		return "HAMLIB / " + strings.ToUpper(strings.TrimSpace(pttMethod))
+	method := strings.ToUpper(strings.TrimSpace(pttMethod))
+	if method == "CAT" {
+		method = "RIGCTL"
 	}
-	if strings.EqualFold(strings.TrimSpace(pttMethod), "VOX") || strings.TrimSpace(pttMethod) == "" {
+	if strings.EqualFold(strings.TrimSpace(backend), "rigctld-net") {
+		return "RIGCTLD NET / " + method
+	}
+	if method == "VOX" || method == "" {
 		return "VOX / AUDIO"
 	}
-	return strings.ToUpper(strings.TrimSpace(pttMethod)) + " / AUDIO"
+	return method + " / SERIAL OR AUDIO"
 }
 
 func (a *App) SetDialFrequency(hz int64) error {
@@ -3408,7 +3539,7 @@ func (a *App) RenderMacro(id, exchange, queueCall string) string {
 			configPath := a.configPath
 			a.settingsMu.Unlock()
 			if configPath != "" {
-				if err := storage.SaveSettings(configPath, settings); err != nil {
+				if err := a.persistSettingsFile(configPath, settings); err != nil {
 					a.emit(model.EventSettingsError, map[string]any{"error": err.Error()})
 					return ""
 				}

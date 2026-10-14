@@ -221,12 +221,14 @@ func (s *JTTYStream) Process(frame []float32, timestamp time.Time, sampleRate in
 		window := append([]float32(nil), s.buf[start:end]...)
 		windowUTC := s.startUTC.Add(time.Duration(s.nextStart) * time.Second / JTTYAudioRate)
 		seq := s.seq + 1
-		// Keep a low-rate full-band fallback even when detector hints exist. The
-		// detector is intentionally advisory; periodic wide sweeps preserve
-		// discovery coverage while reducing the normal hinted path to about one
-		// sweep per eight windows. When no hints exist, retain a one-in-four
-		// fallback so a quiet spectrum can still be discovered.
-		wideSweep := (len(s.centers) == 0 && seq%4 == 0) || (len(s.centers) > 0 && seq%8 == 0)
+		// Full-band discovery is optional CPU work. Single-worker configurations
+		// reduce its cadence to protect audio/UI responsiveness on low-end PCs.
+		wideSweep := false
+		if s.workers <= 1 {
+			wideSweep = (len(s.centers) == 0 && seq%8 == 0) || (len(s.centers) > 0 && seq%16 == 0)
+		} else {
+			wideSweep = (len(s.centers) == 0 && seq%4 == 0) || (len(s.centers) > 0 && seq%8 == 0)
+		}
 		job := jttyWindowJob{sequence: seq, startSample: s.nextStart, samples: window, startUTC: windowUTC, centerHz: s.centerHz, centers: append([]float64(nil), s.centers...)}
 		queued := false
 		select {

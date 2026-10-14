@@ -47,7 +47,7 @@ npm install
 
 - Wails Windows 构建所需的 WebView2 环境
 - Windows 音频设备 / WASAPI
-- JTTY-Go 使用的 Hamlib 支持目前处于 TODO 阶段，相关设备配置页已暂时禁用，但代码保留用于后续开发
+- JTTY-Go 使用内置 Hamlib `rigctld.exe`，应用通过 TCP 文本协议控制频率、模式、异频、PTT 与电平表；也可连接已运行的远端 rigctld 服务
 
 ### Windows 安装程序打包依赖
 
@@ -84,11 +84,7 @@ build/bin/JTTY-Go.exe
 
 ### Windows 发行版打包
 
-需要将完整的 Hamlib Windows runtime 放入：
-
-```text
-bin/
-```
+不需要打包 Hamlib DLL 或 rigctld.exe。电台配置页连接独立运行的 rigctld TCP 服务，默认端口为 4532。
 
 生成 Portable 便携版：
 
@@ -145,6 +141,6 @@ JTTY-Go/
 
 ## TODO
 
-- [ ] 完善并重新启用 Hamlib 电台支持与设备配置页
-- [ ] 完善 CAT / PTT / Split / Mode 等电台控制能力与设备能力判定
+- [x] 重新启用 Hamlib 电台支持与设备配置页，并将 PTT 控制统一交给 rigctld
+- [ ] 持续完善不同 Hamlib 型号的 Split / Mode / PTT 能力判定与实机兼容性验证
 - [ ] 持续优化长时间运行时的实时解码性能与资源占用

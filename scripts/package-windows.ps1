@@ -11,7 +11,6 @@ $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $BuildBin = Join-Path $ProjectRoot 'build\bin'
-$HamlibBin = Join-Path $ProjectRoot 'bin'
 $InstallerScript = Join-Path $ProjectRoot 'installer\JTTY-Go.iss'
 
 Write-Host '== JTTY-Go Windows packaging ==' -ForegroundColor Cyan
@@ -28,26 +27,7 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     throw 'npm not found.'
 }
 
-$rigctld = Join-Path $HamlibBin 'rigctld.exe'
-$rigctl = Join-Path $HamlibBin 'rigctl.exe'
-$dlls = @(Get-ChildItem -Path $HamlibBin -Filter '*.dll' -File -ErrorAction SilentlyContinue)
-
-if (-not (Test-Path $rigctld)) {
-    throw "Missing $rigctld. Put the complete Windows Hamlib runtime into bin\ before packaging."
-}
-if (-not (Test-Path $rigctl)) {
-    throw "Missing $rigctl. The packaged Hamlib tool set should contain rigctl.exe as well as rigctld.exe."
-}
-if ($dlls.Count -eq 0) {
-    throw 'No Hamlib DLLs found in bin\. Refusing to create an incomplete package.'
-}
-
-$runtimeFiles = @(Get-ChildItem -Path $HamlibBin -Recurse -File | Where-Object {
-    $_.Name -notmatch '^(README\.txt|.*\.md)$' -and $_.Name -notmatch '^\.'
-})
-if ($runtimeFiles.Count -lt 3) {
-    throw 'Hamlib bin directory appears incomplete.'
-}
+# NET rigctl connects to an externally managed rigctld server. No local Hamlib files are required.
 
 if (-not $SkipTests) {
     Push-Location $ProjectRoot
@@ -66,7 +46,7 @@ try {
 }
 finally { Pop-Location }
 
-Write-Host '[3/5] Building Wails executable with embedded WebView2 bootstrapper and Hamlib...' -ForegroundColor Yellow
+Write-Host '[3/5] Building Wails executable with embedded WebView2 bootstrapper...' -ForegroundColor Yellow
 Push-Location $ProjectRoot
 try {
     $buildArgs = @('-platform', "windows/$Arch", '-webview2', 'embed', '-trimpath')
@@ -81,10 +61,9 @@ if (-not (Test-Path $exe)) {
     throw "Build completed but executable was not found: $exe"
 }
 
-Write-Host '[4/5] Verifying embedded runtime source and release payload...' -ForegroundColor Yellow
+Write-Host '[4/5] Verifying release payload...' -ForegroundColor Yellow
 Write-Host "Executable: $exe"
 Write-Host ("Executable size: {0:N2} MB" -f ((Get-Item $exe).Length / 1MB))
-Write-Host "Hamlib runtime files: $($runtimeFiles.Count)"
 
 $releaseDir = Join-Path $ProjectRoot 'dist\windows'
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
@@ -92,7 +71,6 @@ $portableDir = Join-Path $releaseDir 'JTTY-Go-portable'
 if (Test-Path $portableDir) { Remove-Item -Recurse -Force $portableDir }
 New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
 Copy-Item $exe (Join-Path $portableDir 'JTTY-Go.exe')
-# The portable EXE already contains the complete embedded Hamlib runtime.
 Copy-Item (Join-Path $ProjectRoot 'LICENSE') (Join-Path $portableDir 'LICENSE.txt')
 if (Test-Path (Join-Path $ProjectRoot 'licenses\WSJT-X-GPL-3.0.txt')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $portableDir 'licenses') | Out-Null

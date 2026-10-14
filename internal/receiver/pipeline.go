@@ -52,7 +52,7 @@ func NewPipeline(scanner *detector.Scanner, tracker *detector.Tracker, sink Cand
 		// The waterfall is a display path, not the decode path. An 8192-point FFT
 		// with a 2048-sample hop keeps roughly the same visual update cadence while
 		// materially reducing FFT work and allocations on lower-end CPUs.
-		p.waterfallAnalyzer = waterfall.NewAnalyzer(sampleRate, 0, maxHz, 8192, 4096)
+		p.waterfallAnalyzer = waterfall.NewAnalyzer(sampleRate, 0, maxHz, 4096, 2048)
 	}
 	p.wg.Add(1)
 	go p.worker()
@@ -191,7 +191,7 @@ func (p *Pipeline) processFrame(frame audio.PCMFrame) {
 		window := p.window[:p.scanner.FFTSize()]
 		at := p.startUTC.Add(time.Duration(p.windowStartSamples) * time.Second / time.Duration(p.sampleRate))
 		p.scanCounter++
-		shouldScan := p.scanCounter%2 == 0
+		shouldScan := p.scanCounter%3 == 0
 		var stable []detector.Candidate
 		var hints []float64
 		if shouldScan {
