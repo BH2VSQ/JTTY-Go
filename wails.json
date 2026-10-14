@@ -7,6 +7,11 @@
   "author": {
     "name": "BH2VSQ"
   },
+  "info": {
+    "companyName": "BH2VSQ",
+    "productName": "JTTY-Go",
+    "productVersion": "5.36.15"
+  },
   "frontend:dev:build": "npm run build",
   "frontend:dev:install": "npm install",
   "frontend:dev:watcher": "npm run dev",

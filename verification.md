@@ -1,6 +1,17 @@
 # JTTY-Go 验证记录 — 2026-10-14
 
-基线：`ac82047`。本地分支：`feat/local-hamlib-jtty-sync`。没有推送、打标签或发布 Release。发行物为本地测试包，安装包沿用原有版本号 5.36.14。
+基线：`ac82047`。本地分支：`feat/local-hamlib-jtty-sync`。没有推送、打标签或发布 Release。当前修复版编号为 5.36.15，安装包文件名已更新以区别上一版。
+
+## 5.36.15：选择 Hamlib 卡死及底部遮挡修复
+
+- 根因：型号、能力、版本及串口列表的请求事件与返回事件重名。Wails 2.15.0 的 `Events.Emit` 会同时通知 Go 与前端，缓存回复再次触发请求，形成无限回送；与是否监听无关。上一轮只向 JavaScript 派发回复的模拟测试漏掉了这条路径。
+- 请求改为 `hamlib:models:request`、`hamlib:capabilities:request`、`hamlib:status:request`、`radio:serial-ports:request`；返回名称保持原有协议。DX 呼号/网格的设置请求也与状态通知分离。
+- PTT 选项改为两列；控件高 26px，卡片间距及字体缩小；设置内容区允许纵向滚动，底栏保持独立。
+- 新增 Go 回送回归测试，覆盖首次真实 Hamlib 型号加载、缓存查询和四类请求/响应，确保一条请求只返回一次。
+- 使用真实 314 个 Hamlib 型号，在 1360×820、1094×680、1280×640 三种视口下反复切换后端、保存独立配置、检查 PTT 与本地连接按钮不会被底栏覆盖。截图在 `.codex/verification/freeze-ui/`。
+- 通过 Wails 开发服务器连接真实 Go 后端，完成 21 次后端切换、11 次型号回复、空闲等待无事件风暴、Dummy CAT/PTT 开关、保存和断开。这次没有模拟 Go 业务处理。
+- 完整 Go 测试、相关模块 race/vet、TypeScript 检查、浏览器回归与 Windows 打包均通过。本次未改变 DSP/FEC 算法，也不将测试环境结果换算成用户电脑的 CPU 百分比。
+- Wails 开发模式 `/wails/ipc.js` 自带调试面板出现 Svelte `nodes` 异常和 `runtime:ready` 提示，单独记录为 SDK 开发工具限制；实际 Go 绑定调用及上述业务流程通过。原生发布版完整 GUI 自动化、实际电台/RF 仍未验证。
 
 ## 已通过
 
@@ -25,9 +36,9 @@
 ## 交付与回滚
 
 - `dist/windows/JTTY-Go-portable-windows.zip`：包含应用、完整 `hamlib/` 和许可文件。
-- `dist/windows/installer/JTTY-Go-5.36.14-Setup.exe`：本地安装测试包，尚未执行安装/卸载回归。
+- `dist/windows/installer/JTTY-Go-5.36.15-Setup.exe`：本地安装测试包，尚未执行安装/卸载回归。
 - 摘要见 `dist/windows/SHA256SUMS.txt`。校验清单同时覆盖包内应用及 Hamlib 可执行文件。
-- 便携 ZIP SHA-256：`cbafa6cffe57c7a0bfd60d25555f70ab0723a2921faab79f115bcd19cd9a2077`。
-- 安装包 SHA-256：`59095f01ce53aae060c73b516309bd6fd539a0b5b972cb097dcbe8e93916de48`。
+- 便携 ZIP SHA-256：`21207e2a6daf4239c37e14cddea7ff365a3c0163d57ba3f6be9f2b7e7fc846e6`。
+- 安装包 SHA-256：`915d89e800a4cbc623cf32185d50f0244a224dbc51f064d1d801fe4fcadb5a31`。
 - 升级/回滚须替换完整应用包，禁止单独替换 DLL。回滚前备份用户配置；旧版本可能重新将本地后端迁移为 NET，因此应同时恢复对应旧配置。
 - `.codex/` 与 `docs/` 留在本地，不纳入本次代码提交。

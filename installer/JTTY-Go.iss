@@ -1,5 +1,5 @@
 #define AppName "JTTY-Go"
-#define AppVersion "5.36.14"
+#define AppVersion "5.36.15"
 #define AppPublisher "BH2VSQ"
 #define AppExeName "JTTY-Go.exe"
 
