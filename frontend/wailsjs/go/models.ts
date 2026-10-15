@@ -381,11 +381,11 @@ export namespace model {
 	    passbandHz: number;
 	    readPowerSWR: boolean;
 	    haltOnSWR: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new RadioProfile(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.rigName = source["rigName"];
@@ -472,7 +472,7 @@ export namespace model {
 	        this.readPowerSWR = source["readPowerSWR"];
 	        this.haltOnSWR = source["haltOnSWR"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
