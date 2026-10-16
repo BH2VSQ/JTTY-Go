@@ -636,3 +636,17 @@ html::-webkit-scrollbar,body::-webkit-scrollbar,#app::-webkit-scrollbar,.shell::
 .radio-net-settings-v4 .txaudio-options label{display:flex;align-items:center;gap:4px;font-size:11px}
 .radio-net-settings-v4 .txaudio-options input{width:auto;height:auto;margin:0}
 .radio-net-settings-v4 .txaudio-options p{flex-basis:100%;margin:0;font-size:10px}
+#about-overlay{display:none;position:fixed;inset:0;z-index:130;background:rgba(32,40,45,.30)}
+#about-overlay.open{display:block}
+.about-window{width:560px;max-width:calc(100vw - 70px);position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;background:#eef0f1;border:1px solid #7c868b;box-shadow:0 8px 30px rgba(0,0,0,.35);color:#2c3439}
+.about-titlebar{height:34px;min-height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 8px;background:linear-gradient(#f7f7f7,#dcdfe2);border-bottom:1px solid #929b9f;font-size:12px}
+.about-titlebar button{width:28px;height:24px;border:1px solid transparent;background:transparent;font-size:18px;color:#465158;cursor:pointer}
+.about-titlebar button:hover{background:#e6e8e9;border-color:#b4bcc0}
+.about-body{flex:1;min-height:0;padding:14px 16px;overflow-y:auto;overflow-x:hidden;background:#f3f5f6;font-size:11px;color:#2f3a40}
+.about-section{margin-bottom:14px}
+.about-section h3{margin:0 0 8px;padding-bottom:5px;border-bottom:1px solid #c6cdd1;font-size:12px;color:#253036}
+.about-section ul{margin:0;padding:0;list-style:none}
+.about-section li{padding:3px 0;line-height:1.5}
+.about-section li b{color:#1d5f80}
+.about-footer{height:45px;min-height:45px;display:flex;align-items:center;justify-content:flex-end;padding:0 8px;background:linear-gradient(#e7e9ea,#d4d8da);border-top:1px solid #9ba4a9}
+.about-footer button{height:28px;min-width:68px;border:1px solid #929ca1;background:linear-gradient(#fafbfb,#e2e5e7);color:#2f3a40;font:11px "Segoe UI",Arial,sans-serif;cursor:pointer}

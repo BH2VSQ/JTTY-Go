@@ -643,6 +643,30 @@ function setSettingsStatus(t:string){const e=document.querySelector('#settings-s
 function normalizeSettingsTab(tab:string){if(tab==='radio'&&!RADIO_SETTINGS_UI_ENABLED)return 'general';return ['general','radio','audio','frequency'].includes(tab)?tab:'general'}
 function openSettings(tab='general'){const next=normalizeSettingsTab(tab);settingsTab=next;settingsDraft=cloneSettings(settingsState);renderSettingsModal(next);document.querySelector('#settings-overlay')!.classList.add('open');if(next==='audio')emitBackendEvent('audio:refresh','')}
 function closeSettings(){closeAfterSettingsSave=false;stopPTTTestCountdown();emitBackendEvent('radio:test-end',{restore:true});document.querySelector('#settings-overlay')!.classList.remove('open')}
+function openAbout(){
+  const overlay=document.querySelector<HTMLDivElement>('#about-overlay');if(!overlay)return
+  overlay.innerHTML=`<div class="about-window">
+    <div class="about-titlebar"><b>JTTY-Go — 致谢</b><button id="about-close" aria-label="关闭">×</button></div>
+    <div class="about-body">
+      <div class="about-section"><h3>开发者</h3><ul>
+        <li><b>BH2VSQ</b>（Assisted by ChatGPT）— JTTY-Go 项目开发与维护（主体结构搭建）</li>
+        <li><b>BG5JSU</b> — JTTY-Go 项目开发与维护（Hamlib 接入调试）</li>
+        <li><b>BG5JVM</b> — 测试环境 / 设备提供</li>
+      </ul></div>
+      <div class="about-section"><h3>技术与项目致谢</h3><ul>
+        <li><b>WSJT-X</b> — 数字通信软件设计与 JTTY 相关参考</li>
+        <li><b>Hamlib</b> — 电台控制接口</li>
+        <li><b>Go、Wails、Vite、TypeScript</b> — 软件开发所使用的技术与工具</li>
+      </ul></div>
+    </div>
+    <div class="about-footer"><button id="about-ok">关闭</button></div>
+  </div>`
+  overlay.classList.add('open')
+  overlay.querySelector('#about-close')!.addEventListener('click',closeAbout)
+  overlay.querySelector('#about-ok')!.addEventListener('click',closeAbout)
+  overlay.addEventListener('click',e=>{if(e.target===overlay)closeAbout()})
+}
+function closeAbout(){document.querySelector('#about-overlay')?.classList.remove('open')}
 function saveSettings(closeAfterSave=false){const payload=collectDraft();closeAfterSettingsSave=closeAfterSave;emitBackendEvent('settings:save',payload);setSettingsStatus('正在保存…')}
 
 function saveDecoderOption(kind:string,value:string){
@@ -1154,7 +1178,7 @@ function handleRadioTestResult(v:any){
   root.innerHTML=`<div class="shell">
     <header class="menu">
       <div class="brand">JTTY-Go</div>
-      <div class="menus"><button id="file-menu">文件</button><button id="save-menu">保存</button><button id="decode-menu">解码</button><button id="range-menu">频率范围</button><button id="config-menu">配置</button></div>
+      <div class="menus"><button id="file-menu">文件</button><button id="save-menu">保存</button><button id="decode-menu">解码</button><button id="range-menu">频率范围</button><button id="config-menu">配置</button><button id="about-menu">致谢</button></div>
       <div class="status"><span>JTTY</span><span class="divider"></span><span id="radio-status">RADIO DISCONNECTED</span><span class="divider"></span><span id="audio-status">RX STOPPED</span><b class="led"></b></div>
     </header>
 
@@ -1242,6 +1266,7 @@ function handleRadioTestResult(v:any){
     <footer><span id="health">Initializing…</span><span>候选 <b id="candidate-count">0</b></span><span><b id="count">0</b> 解码</span><span id="rx-freq-bottom">RX 1500</span><span id="tx-freq-bottom">TX 1500</span><span class="footer-hint">左键瀑布图：RX　右键：TX</span></footer>
     <div id="settings-overlay"></div>
     <div id="qso-overlay"></div>
+    <div id="about-overlay"></div>
     <div id="toast"></div>
     <div id="file-popup" class="file-popup">
       <button id="file-open-adi">打开 JTTY.adi 日志</button>
@@ -1275,6 +1300,7 @@ function handleRadioTestResult(v:any){
   list.addEventListener('scroll',()=>{const atTail=list.scrollHeight-list.scrollTop-list.clientHeight<12;if(atTail&&!followTail){followTail=true;newSinceScroll=0;root.querySelector('#new-indicator')!.textContent='↓ 新解码'}else if(!atTail){followTail=false}})
   root.querySelector('#new-indicator')!.addEventListener('click',()=>{followTail=true;newSinceScroll=0;list.scrollTop=list.scrollHeight;root.querySelector('#new-indicator')!.textContent='↓ 新解码'})
   root.querySelector('#config-menu')!.addEventListener('click',()=>openSettings('general'))
+  root.querySelector('#about-menu')!.addEventListener('click',()=>openAbout())
   root.querySelector('#file-menu')!.addEventListener('click',()=>{root.querySelector('#save-popup')!.classList.remove('open');root.querySelector('#decode-popup')!.classList.remove('open');root.querySelector('#file-popup')!.classList.toggle('open')})
   root.querySelector('#save-menu')!.addEventListener('click',()=>{root.querySelector('#file-popup')!.classList.remove('open');root.querySelector('#decode-popup')!.classList.remove('open');root.querySelector('#save-popup')!.classList.toggle('open')})
   root.querySelector('#decode-menu')!.addEventListener('click',()=>{root.querySelector('#file-popup')!.classList.remove('open');root.querySelector('#save-popup')!.classList.remove('open');root.querySelector('#decode-popup')!.classList.toggle('open');updateDecodeMenu()})
